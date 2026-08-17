@@ -1,0 +1,29 @@
+id: sw-content-production
+name: SW 内容生产
+description: 将 SW 原始业务资料自动生产为工作坊教案红 VI 的小红书与公众号候选，并通过人工 MiniMax 语音门半自动完成视频号；包含来源追溯、官方机构口径、品牌验收、归档与人工发布载荷。
+tags:
+  - workbuddy
+  - sw
+  - content-production
+  - xiaohongshu
+  - wechat
+  - video
+targets:
+  codex: true
+  claude: true
+  antigravity: false
+  openclaw: true
+  workbuddy: true
+  gemini: true
+  trae: false
+  qoder: false
+deploy:
+  strategy: copy
+source:
+  type: github
+  url: https://github.com/xuyuanpu/sw-content-production-workbuddy
+summary_zh: SW 员工内容生产 Skill：小红书和公众号自动生成，短视频在人工 MiniMax 语音交接后继续自动生成。
+category: writing
+category_name: 写作与内容
+risk: medium
+risk_reason: 会在员工选择的工作空间写入文件，并可能调用已授权的图片生成或视频渲染能力；默认不登录或发布平台。

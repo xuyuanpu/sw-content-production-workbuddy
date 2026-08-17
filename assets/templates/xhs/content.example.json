@@ -1,0 +1,38 @@
+{
+  "runningTitle": "选题短名",
+  "footer": "专业解释 · 持续观察",
+  "pages": [
+    {
+      "type": "cover",
+      "title": "一句自然通顺的封面标题",
+      "titleLines": ["一句自然通顺的", "封面标题"],
+      "kicker": "SW 专业编辑解读",
+      "lead": "用一句话说明读者会得到什么。",
+      "entry": "用一到两句从封面自然进入正文。",
+      "image": "./assets/cover.png",
+      "imageCaption": "场景示意 · 非真实案例",
+      "imageNote": "图像只表现冲突，不承担专业结论"
+    },
+    {
+      "type": "article",
+      "chapterNumber": "01",
+      "title": "第一个真正的新论点",
+      "titleLines": ["第一个真正的", "新论点"],
+      "paragraphs": [
+        {"text": "连续文章正文。每页保留真实阅读量，不做卡片墙。", "highlights": ["连续文章正文"]},
+        {"text": "根据内容继续添加段落，并在溢出前分到下一页。", "highlights": []}
+      ]
+    },
+    {
+      "type": "article",
+      "chapterNumber": "02",
+      "title": "把观点落到一个行动",
+      "titleLines": ["把观点落到", "一个行动"],
+      "paragraphs": [
+        {"text": "同一论点跨页时不要重复章节标题；需要专业解释图时可添加 figure，无帮助时不要配图。", "highlights": ["不要重复章节标题"]},
+        {"text": "给出边界、行动和一个读者可以回答的问题。", "highlights": ["边界", "行动"]}
+      ],
+      "closing": {"text": "欢迎分享你的真实观察。", "highlights": []}
+    }
+  ]
+}
