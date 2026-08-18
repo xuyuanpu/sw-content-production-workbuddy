@@ -67,6 +67,12 @@ else add("video returned audio has follow-up report", await exists(path.join(pat
 
 const videoCandidate = path.join(paths.video, "output", "video-candidate.mp4");
 if (await exists(videoCandidate)) {
+  const videoCoverPath = path.join(paths.video, "output", "video-cover.png");
+  add("video standalone cover exists", await exists(videoCoverPath));
+  if (await exists(videoCoverPath)) {
+    const coverSize = pngSize(await fs.readFile(videoCoverPath));
+    add("video cover is 1080x1920", coverSize.width === 1080 && coverSize.height === 1920, coverSize);
+  }
   const videoReportPath = path.join(paths.video, "output", "video-report.json");
   add("video report exists", await exists(videoReportPath));
   if (await exists(videoReportPath)) {
@@ -74,6 +80,7 @@ if (await exists(videoCandidate)) {
     add("video has no detected black-frame flashes", videoReport.checks?.temporal?.blackEvents?.length === 0, videoReport.checks?.temporal?.blackEvents);
     add("video has no rapid one-frame flash pairs", videoReport.checks?.temporal?.rapidFlashPairs?.length === 0, videoReport.checks?.temporal?.rapidFlashPairs);
     add("video subtitle boundaries do not reset full-frame transitions", videoReport.checks?.transitionPolicy === "画面只在镜头边界切换；字幕边界不做整帧淡入淡出或动画重置", videoReport.checks?.transitionPolicy);
+    add("video first frame is the validated cover", videoReport.checks?.cover?.passed === true && videoReport.checks?.cover?.firstFrameMatchesCover === true && videoReport.checks?.cover?.firstFrameSsim >= 0.98, videoReport.checks?.cover);
   }
 }
 

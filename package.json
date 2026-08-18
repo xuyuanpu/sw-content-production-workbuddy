@@ -1,6 +1,6 @@
 {
   "name": "sw-content-production-skill",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
   "description": "Portable WorkBuddy skill runtime for SW content production.",

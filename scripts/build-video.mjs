@@ -3,10 +3,11 @@ import path from "node:path";
 import {pathToFileURL} from "node:url";
 import {execFile} from "node:child_process";
 import {promisify} from "node:util";
-import {ensureDir, exists, findPlaywright, parseArgs, platformPaths, readJson, writeJson, sha256, forbiddenHits} from "./lib.mjs";
+import {compactCount, ensureDir, exists, findPlaywright, parseArgs, platformPaths, pngSize, readJson, writeJson, sha256, forbiddenHits} from "./lib.mjs";
 import {inspectVideo} from "./video-qc.mjs";
 
 const run = promisify(execFile);
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/gu, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"})[character]);
 const args = parseArgs();
 if (!args.unit) { console.error("用法: node build-video.mjs --unit <内容单元路径>"); process.exit(2); }
 const {video} = platformPaths(args.unit);
@@ -24,8 +25,23 @@ const audioHash = sha256(await fs.readFile(audioPath));
 const segments = []; // {start, end, scene, subtitle, gap}
 const scenes = data.scenes;
 const subs = data.subtitles;
+if (!Array.isArray(scenes) || !scenes.length) throw new Error("scenes.json 至少需要一个镜头");
+if (!Array.isArray(subs) || !subs.length) throw new Error("scenes.json 至少需要一条字幕");
 const minimumSceneDuration = Number(data.video.minimumSceneDuration || 1.8);
 const minimumSubtitleDuration = Number(data.video.minimumSubtitleDuration || 1.2);
+const minimumCoverDuration = Number(data.video.minimumCoverDuration || 1.8);
+const firstScene = scenes[0];
+const coverTitleLines = (Array.isArray(firstScene.titleLines) ? firstScene.titleLines : [firstScene.overlayTitle])
+  .map((line) => String(line || "").trim())
+  .filter(Boolean);
+const coverTitle = coverTitleLines.join("");
+const coverAssetPath = path.join(video, firstScene.asset || "assets/cover.png");
+if (firstScene.start !== 0 || firstScene.visual !== "cover") throw new Error("第一镜必须从 0 秒开始且 visual=cover，确保视频第一帧就是正式封面");
+if (firstScene.end - firstScene.start < minimumCoverDuration) throw new Error(`封面镜头不得少于 ${minimumCoverDuration}s`);
+if (!await exists(coverAssetPath)) throw new Error(`封面镜头缺少高分辨率位图素材: ${coverAssetPath}`);
+if (coverTitleLines.length < 1 || coverTitleLines.length > 3 || compactCount(coverTitle) < 4 || compactCount(coverTitle) > 28 || coverTitleLines.some((line) => compactCount(line) > 14)) {
+  throw new Error("封面标题必须按语义拆成 1–3 行，每行不超过 14 字，总长 4–28 字；优先使用 titleLines 明确断行");
+}
 const sceneDurationViolations = scenes.filter((scene) => scene.end - scene.start < minimumSceneDuration).map((scene) => ({id: scene.id, duration: scene.end - scene.start}));
 const subtitleDurationViolations = subs.filter((subtitle) => subtitle.end - subtitle.start < minimumSubtitleDuration).map((subtitle) => ({text: subtitle.text, duration: subtitle.end - subtitle.start}));
 const sceneOrderViolations = scenes.filter((scene, index) => scene.end <= scene.start || (index > 0 && scene.start < scenes[index - 1].end)).map((scene) => scene.id);
@@ -45,7 +61,7 @@ const videoEnd = Math.max(data.video.duration, cursor + 0.3);
 if (videoEnd > cursor) segments.push({start: cursor, end: videoEnd, scene: sceneAt(Math.max(cursor - 0.01, 0)), subtitle: "", gap: true});
 
 // ---- 禁止词扫描 ----
-const publicText = segments.map((s) => s.subtitle).join("\n");
+const publicText = [coverTitle, firstScene.deck || "", ...segments.map((s) => s.subtitle)].join("\n");
 const hits = forbiddenHits(publicText);
 if (hits.length) throw new Error(`字幕命中个人归属禁用项: ${hits.join(", ")}`);
 
@@ -61,7 +77,7 @@ async function assetDataUrl(file) {
   const mime = {".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml"}[ext] || "application/octet-stream";
   return `data:${mime};base64,${(await fs.readFile(file)).toString("base64")}`;
 }
-const coverData = await assetDataUrl(path.join(video, "assets", "cover.png"));
+const coverData = await assetDataUrl(coverAssetPath);
 const layersData = await assetDataUrl(path.join(video, "assets", "content-image.png"));
 const logoData = await assetDataUrl(path.join(video, "assets", "logo.png"));
 
@@ -70,7 +86,7 @@ function frameHtml(segment) {
   const s = scene || scenes[0];
   const visual = renderVisual(s, segment);
   const subHtml = subtitle
-    ? `<div class="sub"><span>${subtitle}</span></div>`
+    ? `<div class="sub"><span>${escapeHtml(subtitle)}</span></div>`
     : `<div class="sub empty"><span></span></div>`;
   const num = String(Math.max(0, scenes.indexOf(s)) + 1).padStart(2, "0");
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
@@ -110,6 +126,16 @@ function renderVisual(s, segment) {
     .card.accent-card{background:#F6E8E8;border-color:#9E2F3F}
     .tagline{font-size:30px;font-weight:650;color:#9E2F3F;letter-spacing:2px;margin-bottom:20px}
     .cover-img{width:100%;max-width:980px;border-radius:18px;box-shadow:0 16px 44px rgba(50,35,35,.18);object-fit:cover}
+    .cover-editorial{width:100%;height:100%;padding:54px 140px 54px 64px;display:grid;grid-template-rows:minmax(0,48%) auto;gap:38px;align-content:center}
+    .cover-figure{position:relative;min-height:0;overflow:hidden;border:2px solid #D8C4C7;border-radius:18px;background:#FFFDFB;box-shadow:0 18px 46px rgba(50,35,35,.12)}
+    .cover-figure img{display:block;width:100%;height:100%;object-fit:cover;object-position:50% 48%}
+    .cover-figure::after{content:"";position:absolute;left:0;right:0;bottom:0;height:8px;background:#9E2F3F}
+    .cover-copy{align-self:start;text-align:left}
+    .cover-kicker{font-size:27px;line-height:1.2;font-weight:700;letter-spacing:2px;color:#9E2F3F;margin-bottom:18px}
+    .cover-title{font-size:74px;line-height:1.16;font-weight:760;letter-spacing:-2px;color:#2B2929}
+    .cover-title span{display:block;white-space:nowrap}
+    .cover-title span:first-child{color:#9E2F3F}
+    .cover-deck{font-size:30px;line-height:1.5;font-weight:450;color:#756D6D;margin-top:22px;max-width:780px}
     .strike{position:relative;display:inline-block}
     .strike::after{content:"";position:absolute;left:-4%;top:52%;width:108%;height:6px;background:#9E2F3F;border-radius:3px;transform:rotate(-4deg)}
     .path-step{display:flex;align-items:center;gap:22px}
@@ -120,7 +146,8 @@ function renderVisual(s, segment) {
   `;
   let body = "";
   if (tag === "cover" && coverData) {
-    body = `<div class="v"><img class="cover-img" src="${coverData}"><div style="height:34px"></div><div class="h1 accent">${s.overlayTitle || ""}</div><div class="small">SW 编辑部 · MBTI 观察</div></div>`;
+    const titleLines = (Array.isArray(s.titleLines) ? s.titleLines : [s.overlayTitle]).map((line) => `<span>${escapeHtml(line)}</span>`).join("");
+    body = `<div class="cover-editorial"><figure class="cover-figure"><img data-cover-source src="${coverData}" alt=""></figure><section class="cover-copy"><div class="cover-kicker">SW 专业编辑解读</div><h1 class="cover-title" data-cover-title>${titleLines}</h1>${s.deck ? `<p class="cover-deck">${escapeHtml(s.deck)}</p>` : ""}</section></div>`;
   } else if (tag === "question-card") {
     body = `<div class="v"><div class="card accent-card"><div class="tagline">一个更深的问法</div><div class="h1 accent" style="font-size:76px">${s.overlayTitle || "我为什么会这样？"}</div><div class="small" style="margin-top:18px">很多工具就接不住了</div></div></div>`;
   } else if (tag === "comparison") {
@@ -144,7 +171,7 @@ function renderVisual(s, segment) {
   } else if (tag === "cta") {
     body = `<div class="v"><div class="comment">💬</div><div class="h1" style="font-size:58px;max-width:860px">${s.overlayTitle || "你最近一次问自己，是什么时候？"}</div><div class="small" style="margin-top:22px">欢迎在评论区聊聊</div></div>`;
   } else {
-    body = `<div class="v"><div class="h1 accent">${s.name}</div><div class="small">${s.voiceover || ""}</div></div>`;
+    body = `<div class="v"><div class="h1 accent">${escapeHtml(s.name)}</div><div class="small">${escapeHtml(s.voiceover || "")}</div></div>`;
   }
   return `<style>${css}</style>${body}`;
 }
@@ -153,22 +180,58 @@ function renderVisual(s, segment) {
 const {chromium} = await findPlaywright();
 const browser = await chromium.launch({headless: true});
 const page = await browser.newPage({viewport: {width, height}, deviceScaleFactor: 1});
+let firstFrameMetrics = null;
 try {
-  for (const segment of segments) {
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
     const html = frameHtml(segment);
-    const file = path.join(framesDir, `frame-${String(segments.indexOf(segment) + 1).padStart(2, "0")}.html`);
+    const file = path.join(framesDir, `frame-${String(index + 1).padStart(2, "0")}.html`);
     await fs.writeFile(file, html);
     await page.goto(pathToFileURL(file).href, {waitUntil: "load"});
-    await page.evaluate(async () => document.fonts.ready);
+    await page.evaluate(async () => {
+      await document.fonts.ready;
+      await Promise.all([...document.images].map((item) => item.decode()));
+    });
+    if (index === 0) {
+      firstFrameMetrics = await page.evaluate(() => {
+        const source = document.querySelector("[data-cover-source]");
+        const title = document.querySelector("[data-cover-title]");
+        const sourceBox = source?.getBoundingClientRect();
+        const titleBox = title?.getBoundingClientRect();
+        return {
+          canvas: {width: document.documentElement.clientWidth, height: document.documentElement.clientHeight},
+          source: source ? {naturalWidth: source.naturalWidth, naturalHeight: source.naturalHeight, displayWidth: sourceBox.width, displayHeight: sourceBox.height} : null,
+          title: titleBox ? {left: titleBox.left, top: titleBox.top, right: titleBox.right, bottom: titleBox.bottom} : null,
+          overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+          overflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight,
+        };
+      });
+    }
     await page.screenshot({path: file.replace(/\.html$/u, ".png")});
   }
 } finally {
   await browser.close();
 }
 
+const titleInSafeCore = firstFrameMetrics?.title
+  && firstFrameMetrics.title.left >= 60
+  && firstFrameMetrics.title.right <= 940
+  && firstFrameMetrics.title.top >= 240
+  && firstFrameMetrics.title.bottom <= 1680;
+const sourceNotUpscaled = firstFrameMetrics?.source
+  && firstFrameMetrics.source.naturalWidth >= firstFrameMetrics.source.displayWidth
+  && firstFrameMetrics.source.naturalHeight >= firstFrameMetrics.source.displayHeight;
+if (!titleInSafeCore) throw new Error(`封面标题超出 9:16 中央 3:4 安全核心区: ${JSON.stringify(firstFrameMetrics?.title)}`);
+if (!sourceNotUpscaled) throw new Error(`封面位图被低分辨率放大: ${JSON.stringify(firstFrameMetrics?.source)}`);
+if (firstFrameMetrics.overflowX > 0 || firstFrameMetrics.overflowY > 0) throw new Error(`封面首帧发生溢出: ${JSON.stringify(firstFrameMetrics)}`);
+
 // ---- ffmpeg 合成 ----
 const outDir = path.join(video, "output");
 await ensureDir(outDir);
+const coverOutputPath = path.join(outDir, "video-cover.png");
+await fs.copyFile(path.join(framesDir, "frame-01.png"), coverOutputPath);
+const coverOutputSize = pngSize(await fs.readFile(coverOutputPath));
+if (coverOutputSize.width !== width || coverOutputSize.height !== height) throw new Error(`视频封面尺寸错误: ${coverOutputSize.width}×${coverOutputSize.height}`);
 const clipDir = path.join(video, ".clips");
 await ensureDir(clipDir);
 for (const name of await fs.readdir(clipDir)) { if (name.endsWith(".mp4")) await fs.unlink(path.join(clipDir, name)); }
@@ -198,6 +261,13 @@ const finalName = "video-candidate.mp4";
 const finalPath = path.join(outDir, finalName);
 await run("ffmpeg", ["-y", "-i", videoNoAudio, "-i", audioAac, "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", finalPath]);
 
+// 独立封面必须与视频解码后的第一帧实质一致，避免上传封面和开场画面跳变。
+const decodedFirstFrame = path.join(clipDir, "decoded-first-frame.png");
+await run("ffmpeg", ["-y", "-i", finalPath, "-frames:v", "1", decodedFirstFrame]);
+const ssimResult = await run("ffmpeg", ["-i", coverOutputPath, "-i", decodedFirstFrame, "-lavfi", "ssim", "-f", "null", "-"]);
+const firstFrameSsim = Number(`${ssimResult.stdout}\n${ssimResult.stderr}`.match(/All:([0-9.]+)/u)?.[1] || 0);
+const firstFrameMatchesCover = firstFrameSsim >= 0.98;
+
 // ---- 探测与报告 ----
 const probe = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type,width,height,r_frame_rate,sample_rate,channels", "-of", "json", finalPath]);
 const temporal = await inspectVideo(finalPath);
@@ -216,6 +286,18 @@ const report = {
     minimumSubtitleDuration,
     sceneDurationViolations,
     subtitleDurationViolations,
+    cover: {
+      passed: firstScene.start === 0 && firstScene.visual === "cover" && titleInSafeCore && sourceNotUpscaled && firstFrameMatchesCover,
+      output: coverOutputPath,
+      size: coverOutputSize,
+      firstScene: {id: firstScene.id, start: firstScene.start, end: firstScene.end, duration: firstScene.end - firstScene.start},
+      titleLines: coverTitleLines,
+      safeCore: {x: 60, y: 240, width: 880, height: 1440},
+      firstFrameSsim,
+      firstFrameMatchesCover,
+      metrics: firstFrameMetrics,
+      policy: "第一帧即正式封面；独立封面由同一首帧导出；关键标题位于中央 3:4 安全核心区",
+    },
     transitionPolicy: "画面只在镜头边界切换；字幕边界不做整帧淡入淡出或动画重置",
     temporal,
   },
@@ -229,5 +311,6 @@ for (const dir of [framesDir, clipDir]) {
   await fs.rm(dir, {recursive: true, force: true});
 }
 
+if (!report.checks.cover.passed) throw new Error(`视频首帧封面检查失败: ${JSON.stringify(report.checks.cover)}`);
 if (!temporal.passed) throw new Error(`视频闪烁检查失败: ${JSON.stringify({blackEvents: temporal.blackEvents, rapidFlashPairs: temporal.rapidFlashPairs})}`);
-console.log(JSON.stringify({status: report.status, output: finalPath, duration: report.probe.format?.duration, frames: segments.length}, null, 2));
+console.log(JSON.stringify({status: report.status, output: finalPath, cover: coverOutputPath, duration: report.probe.format?.duration, frames: segments.length}, null, 2));
