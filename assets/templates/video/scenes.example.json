@@ -1,0 +1,46 @@
+{
+  "video": {
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "duration": 12,
+    "audio": "audio-inbox/returned-voice.mp3",
+    "minimumSceneDuration": 1.8,
+    "minimumSubtitleDuration": 1.2,
+    "minimumCoverDuration": 1.8
+  },
+  "scenes": [
+    {
+      "id": "s1",
+      "name": "封面与冲突开场",
+      "start": 0,
+      "end": 3.5,
+      "visual": "cover",
+      "asset": "assets/cover.png",
+      "titleLines": ["一句能停住人的", "核心冲突"],
+      "deck": "可选的一句解释，不重复标题",
+      "voiceover": "第一句口播与封面钩子一致或直接承接。"
+    },
+    {
+      "id": "s2",
+      "name": "专业解释",
+      "start": 3.5,
+      "end": 12,
+      "visual": "question-card",
+      "overlayTitle": "进入专业判断",
+      "voiceover": "从冲突进入解释。"
+    }
+  ],
+  "subtitles": [
+    {
+      "start": 0,
+      "end": 3.5,
+      "text": "第一句口播字幕"
+    },
+    {
+      "start": 3.5,
+      "end": 12,
+      "text": "第二句口播字幕"
+    }
+  ]
+}
