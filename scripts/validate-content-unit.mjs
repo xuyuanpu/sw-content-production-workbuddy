@@ -65,6 +65,32 @@ add("video unique MiniMax input exists", await exists(path.join(paths.video, "tt
 if (!audioFiles.length) add("video waits for manually generated audio", true, "没有音频时不要求分镜或成片", "info");
 else add("video returned audio has follow-up report", await exists(path.join(paths.video, "audio-report.json")), audioFiles, "warning");
 
+const videoCandidate = path.join(paths.video, "output", "video-candidate.mp4");
+if (await exists(videoCandidate)) {
+  const videoReportPath = path.join(paths.video, "output", "video-report.json");
+  add("video report exists", await exists(videoReportPath));
+  if (await exists(videoReportPath)) {
+    const videoReport = await readJson(videoReportPath);
+    add("video has no detected black-frame flashes", videoReport.checks?.temporal?.blackEvents?.length === 0, videoReport.checks?.temporal?.blackEvents);
+    add("video has no rapid one-frame flash pairs", videoReport.checks?.temporal?.rapidFlashPairs?.length === 0, videoReport.checks?.temporal?.rapidFlashPairs);
+    add("video subtitle boundaries do not reset full-frame transitions", videoReport.checks?.transitionPolicy === "画面只在镜头边界切换；字幕边界不做整帧淡入淡出或动画重置", videoReport.checks?.transitionPolicy);
+  }
+}
+
+const reviewReportPath = path.join(paths.review, "review-report.json");
+if (await exists(xhsOut) && await exists(wechatOut)) {
+  add("final review report exists", await exists(reviewReportPath));
+  if (await exists(reviewReportPath)) {
+    const reviewReport = await readJson(reviewReportPath);
+    add("final review is fully passed", reviewReport.passed, reviewReport.components);
+    const xhsComponent = reviewReport.components?.xhs;
+    const xhsMetrics = reviewReport.metrics?.xhs;
+    add("xhs copy is enabled only with visible valid pages", xhsComponent?.ready
+      ? xhsMetrics?.natural?.width === 1080 && xhsMetrics?.natural?.height === 1440 && xhsMetrics?.copyDisabled === false && xhsMetrics?.emptyVisible === false
+      : xhsMetrics?.copyDisabled === true && xhsMetrics?.emptyVisible === true, {component: xhsComponent, metrics: xhsMetrics});
+  }
+}
+
 const failed = checks.filter((item) => !item.passed && item.level === "error");
 const report = {generatedAt: new Date().toISOString(), unit: paths.unit, summary: {passed: checks.filter((item) => item.passed).length, failed: failed.length, warnings: checks.filter((item) => !item.passed && item.level === "warning").length}, checks};
 await writeJson(path.join(paths.ai, "validation-report.json"), report);
