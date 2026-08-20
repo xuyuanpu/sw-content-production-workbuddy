@@ -6,6 +6,7 @@ import {fileURLToPath, pathToFileURL} from "node:url";
 
 export const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 export const skillRoot = path.resolve(scriptDir, "..");
+export const WECHAT_CHARACTER_RANGE = Object.freeze({min: 1000, max: 1500});
 
 export function parseArgs(argv = process.argv.slice(2)) {
   const args = {};
@@ -117,7 +118,7 @@ export async function nextId(outputRoot) {
 
 export function mimeFor(file) {
   const extension = path.extname(file).toLowerCase();
-  return ({".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml", ".webp": "image/webp"})[extension] || "application/octet-stream";
+  return ({".png": "image/png", ".gif": "image/gif", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".svg": "image/svg+xml", ".webp": "image/webp"})[extension] || "application/octet-stream";
 }
 
 export async function dataUrl(file) {

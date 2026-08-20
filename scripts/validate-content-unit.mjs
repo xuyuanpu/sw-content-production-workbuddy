@@ -1,6 +1,8 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import {compactCount, exists, forbiddenHits, parseArgs, platformPaths, pngSize, readJson, writeJson} from "./lib.mjs";
+import {WECHAT_CHARACTER_RANGE, compactCount, exists, forbiddenHits, parseArgs, platformPaths, pngSize, readJson, sha256, writeJson} from "./lib.mjs";
+import {analyzeVoiceover} from "./voiceover-lib.mjs";
+import {WECHAT_BRAND_ASSETS, WECHAT_BRAND_COPY} from "./wechat-brand-shell.mjs";
 
 const args = parseArgs();
 if (!args.unit) { console.error("用法: node validate-content-unit.mjs --unit <内容单元路径>"); process.exit(2); }
@@ -51,17 +53,50 @@ if (await exists(wechatOut)) {
   const reportPath = path.join(wechatOut, "check-report.json");
   if (await exists(reportPath)) {
     const report = await readJson(reportPath);
-    add("wechat reader-visible body <=500", report.characterCount <= 500, {characterCount: report.characterCount});
+    add(`wechat reader-visible body ${WECHAT_CHARACTER_RANGE.min}-${WECHAT_CHARACTER_RANGE.max}`, report.characterCount >= WECHAT_CHARACTER_RANGE.min && report.characterCount <= WECHAT_CHARACTER_RANGE.max, {characterCount: report.characterCount});
     add("wechat browser check passed", report.passed, report.errors);
   } else add("wechat check report exists", false);
   const imageFiles = (await fs.readdir(wechatOut)).filter((name) => /^content-image\.(png|jpe?g|svg|webp)$/iu.test(name));
   add("wechat has substantive content image", imageFiles.length >= 1, imageFiles);
+  const brandAssetChecks = {};
+  for (const [name, expected] of Object.entries(WECHAT_BRAND_ASSETS)) {
+    const file = path.join(wechatOut, name);
+    brandAssetChecks[name] = await exists(file) ? sha256(await fs.readFile(file)) === expected : false;
+  }
+  add("wechat fixed brand images are exact source copies", Object.values(brandAssetChecks).every(Boolean), brandAssetChecks);
+  const articleHtml = await exists(path.join(wechatOut, "article.html")) ? await fs.readFile(path.join(wechatOut, "article.html"), "utf8") : "";
+  const lockedBrandCopy = [...WECHAT_BRAND_COPY.intro, ...WECHAT_BRAND_COPY.legal];
+  const articleVisibleText = articleHtml
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/giu, "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/giu, "")
+    .replace(/<[^>]+>/gu, "")
+    .replace(/&amp;/gu, "&")
+    .replace(/&lt;/gu, "<")
+    .replace(/&gt;/gu, ">")
+    .replace(/&quot;/gu, '"')
+    .replace(/&#39;/gu, "'");
+  add("wechat fixed brand copy is present verbatim", lockedBrandCopy.every((line) => articleVisibleText.includes(line)), lockedBrandCopy.filter((line) => !articleVisibleText.includes(line)));
 } else add("wechat candidate output exists", false);
 
 const audioInbox = path.join(paths.video, "audio-inbox");
 const audioFiles = await exists(audioInbox) ? (await fs.readdir(audioInbox)).filter((name) => !name.startsWith(".")) : [];
-add("video voiceover draft exists", await exists(path.join(paths.video, "voiceover-draft.md")), null, "warning");
-add("video unique MiniMax input exists", await exists(path.join(paths.video, "tts-input.txt")), null, "warning");
+const draftPath = path.join(paths.video, "voiceover-draft.md");
+const ttsPath = path.join(paths.video, "tts-input.txt");
+const voiceoverReportPath = path.join(paths.video, "voiceover-report.json");
+add("video voiceover draft exists", await exists(draftPath));
+add("video unique MiniMax input exists", await exists(ttsPath));
+if (await exists(draftPath) && await exists(ttsPath)) {
+  const liveVoiceover = analyzeVoiceover(await fs.readFile(draftPath, "utf8"), await fs.readFile(ttsPath, "utf8"));
+  add("video voiceover content and prosody checks pass", liveVoiceover.passed, liveVoiceover.checks.filter((check) => !check.passed));
+  add("video voiceover report exists", await exists(voiceoverReportPath));
+  if (await exists(voiceoverReportPath)) {
+    const storedVoiceover = await readJson(voiceoverReportPath);
+    add("video voiceover report is passed and current", storedVoiceover.passed === true
+      && storedVoiceover.fingerprints?.draftBody === liveVoiceover.fingerprints.draftBody
+      && storedVoiceover.fingerprints?.ttsInput === liveVoiceover.fingerprints.ttsInput,
+    {stored: storedVoiceover.fingerprints, current: liveVoiceover.fingerprints});
+  }
+}
 if (!audioFiles.length) add("video waits for manually generated audio", true, "没有音频时不要求分镜或成片", "info");
 else add("video returned audio has follow-up report", await exists(path.join(paths.video, "audio-report.json")), audioFiles, "warning");
 
@@ -95,6 +130,12 @@ if (await exists(xhsOut) && await exists(wechatOut)) {
     add("xhs copy is enabled only with visible valid pages", xhsComponent?.ready
       ? xhsMetrics?.natural?.width === 1080 && xhsMetrics?.natural?.height === 1440 && xhsMetrics?.copyDisabled === false && xhsMetrics?.emptyVisible === false
       : xhsMetrics?.copyDisabled === true && xhsMetrics?.emptyVisible === true, {component: xhsComponent, metrics: xhsMetrics});
+    const voiceoverComponent = reviewReport.components?.voiceover;
+    const voiceoverMetrics = reviewReport.metrics?.voiceover;
+    add("voiceover copy is enabled only with passed current machine稿", voiceoverComponent?.ready
+      ? voiceoverMetrics?.textLength > 0 && voiceoverMetrics?.copyDisabled === false && voiceoverMetrics?.emptyVisible === false
+      : voiceoverMetrics?.copyDisabled === true && voiceoverMetrics?.emptyVisible === true,
+    {component: voiceoverComponent, metrics: voiceoverMetrics});
   }
 }
 

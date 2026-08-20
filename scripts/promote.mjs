@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import {copyTree, ensureDir, exists, parseArgs, platformPaths, timestamp, writeJson} from "./lib.mjs";
+import {WECHAT_CHARACTER_RANGE, copyTree, ensureDir, exists, parseArgs, platformPaths, timestamp, writeJson} from "./lib.mjs";
 
 const args = parseArgs();
 if (!args.unit || args.confirm !== "YES") {
@@ -14,6 +14,14 @@ const map = {
   wechat: {source: path.join(paths.wechat, "output"), target: paths.wechatFinal, archive: "公众号"},
   video: {source: path.join(paths.video, "output"), target: paths.videoFinal, archive: "短视频"},
 };
+if (selected.includes("wechat")) {
+  const checkPath = path.join(paths.wechat, "output", "check-report.json");
+  if (!await exists(checkPath)) throw new Error("公众号候选缺少 check-report.json，不得提升成品");
+  const check = JSON.parse(await fs.readFile(checkPath, "utf8"));
+  if (check.passed !== true || check.characterCount < WECHAT_CHARACTER_RANGE.min || check.characterCount > WECHAT_CHARACTER_RANGE.max) {
+    throw new Error(`公众号候选未通过 ${WECHAT_CHARACTER_RANGE.min}～${WECHAT_CHARACTER_RANGE.max} 字及浏览器检查，当前 ${check.characterCount ?? "未知"} 字`);
+  }
+}
 const actions = [];
 for (const key of selected) {
   const item = map[key];

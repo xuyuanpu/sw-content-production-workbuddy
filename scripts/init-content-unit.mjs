@@ -52,6 +52,9 @@ for (const destination of [path.join(xhs, "assets", "logo.png"), path.join(wecha
   await ensureDir(path.dirname(destination));
   await fs.copyFile(path.join(skillRoot, "assets", "logo.png"), destination);
 }
+for (const name of ["header.gif", "footer-group.png", "footer-channels.webp"]) {
+  await fs.copyFile(path.join(skillRoot, "assets", "brand", "wechat", name), path.join(wechat, "assets", `brand-${name}`));
+}
 
 const manifest = {
   schemaVersion: 1,
