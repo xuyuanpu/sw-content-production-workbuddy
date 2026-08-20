@@ -3,9 +3,9 @@
 面向 SW（Skill&Will）员工的内容生产 Skill。输入一份有明确来源和使用边界的原始资料后：
 
 - 自动生成工作坊教案·红 VI 的小红书图文、拼接长图和发布文案候选；
-- 自动生成 500 字以内、含实质内容图的公众号 HTML、长图和发布文案候选；
-- 自动生成短视频口播稿；员工在海外 MiniMax 手动生成并回传音频后，再继续完成首帧封面、分镜、字幕、Remotion 画面、BGM、音效和成片候选；
-- 自动生成跨平台验收页；内容不可见时同步禁用复制按钮，避免假就绪；最终坚持“AI 生成、人审确认、人工发布”。
+- 自动生成 1000～1500 字、含实质内容图和 SW 固定品牌壳的公众号 HTML、长图和发布文案候选；固定品牌文字不计入正文、不得精简；
+- 自动生成自然口语内容稿和经硬校验的 MiniMax 唯一机器稿；员工在海外 MiniMax 手动生成并回传音频后，再继续完成首帧封面、分镜、字幕、Remotion 画面、BGM、音效和成片候选；
+- 自动生成跨平台验收页，同页预览并复制小红书、公众号和口播机器稿；内容不可见或语气校验未通过时同步禁用复制按钮，避免假就绪；最终坚持“AI 生成、人审确认、人工发布”。
 
 > 内部使用：本仓库包含 SW 品牌规范与内容生产规则，只提供给获得授权的 SW 员工。
 
@@ -46,6 +46,15 @@ node scripts/doctor.mjs
 
 ```bash
 node scripts/video-qc.mjs --input <video-candidate.mp4>
+```
+
+口播机器稿交给员工前必须生成当前语气质检报告：
+
+```bash
+node scripts/voiceover-qc.mjs \
+  --draft <内容单元>/AIworkspace/40-video/current/voiceover-draft.md \
+  --tts <内容单元>/AIworkspace/40-video/current/tts-input.txt \
+  --report <内容单元>/AIworkspace/40-video/current/voiceover-report.json
 ```
 
 ## 使用方式
