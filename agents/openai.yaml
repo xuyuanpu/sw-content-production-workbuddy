@@ -1,7 +1,7 @@
 interface:
   display_name: "SW 内容生产"
-  short_description: "按 SW 现行标准自动生成小红书和公众号，半自动生成短视频"
+  short_description: "按所选平台生成有来源的 SW 内容候选，并按需制作图文与视频"
   icon_small: "./assets/logo.png"
   icon_large: "./assets/logo.png"
   brand_color: "#9E2F3F"
-  default_prompt: "使用 $sw-content-production 将这份原始资料生产为 SW 小红书、公众号与短视频内容。"
+  default_prompt: "使用 $sw-content-production 按我指定的平台和阶段处理这份材料，先给可读候选。"

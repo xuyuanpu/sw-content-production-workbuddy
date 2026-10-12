@@ -18,6 +18,10 @@
   let body = "";
   if (page.type === "cover") {
     body = `<figure class="cover-figure"><img data-cover-image src="${escapeHtml(page.image || "./assets/cover.png")}" alt=""><figcaption>${escapeHtml(page.imageCaption || "场景示意")}<i></i>${escapeHtml(page.imageNote || "")}</figcaption></figure><section class="cover-copy"><p class="cover-kicker">${escapeHtml(page.kicker || "SW 专业编辑解读")}</p><h1 class="cover-title">${titleLines}</h1><p class="cover-lead">${escapeHtml(page.lead)}</p><p class="cover-entry">${escapeHtml(page.entry)}</p></section>`;
+  } else if (page.type === "figure") {
+    const heading = page.title ? `<header class="chapter-heading figure-heading">${page.chapterNumber ? `<p class="chapter-number">${escapeHtml(page.chapterNumber)}</p>` : ""}<h1>${titleLines}</h1></header>` : "";
+    const caption = page.figure?.caption ? `<figcaption>${escapeHtml(page.figure.caption)}</figcaption>` : "";
+    body = `<section class="article-stream figure-page">${heading}<figure class="article-figure full-figure"><img data-content-image src="${escapeHtml(page.figure?.src || "")}" alt="">${caption}</figure></section>`;
   } else {
     const heading = page.title ? `<header class="chapter-heading"><p class="chapter-number">${escapeHtml(page.chapterNumber || String(pageNumber - 1).padStart(2, "0"))}</p><h1>${titleLines}</h1></header>` : "";
     const figure = page.figure ? `<figure class="article-figure"><img data-content-image src="${escapeHtml(page.figure.src)}" alt=""><figcaption>${escapeHtml(page.figure.caption || "")}</figcaption></figure>` : "";

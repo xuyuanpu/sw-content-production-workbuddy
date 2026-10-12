@@ -1,12 +1,20 @@
+import {inspectGraphic} from './graphic-integrity-lib.mjs';
 import fs from "node:fs/promises";
 import path from "node:path";
 import {WECHAT_CHARACTER_RANGE, compactCount, exists, forbiddenHits, parseArgs, platformPaths, pngSize, readJson, sha256, writeJson} from "./lib.mjs";
+import {confirmedVoiceoverMatches} from "./confirmed-voiceover-lib.mjs";
 import {analyzeVoiceover} from "./voiceover-lib.mjs";
 import {WECHAT_BRAND_ASSETS, WECHAT_BRAND_COPY} from "./wechat-brand-shell.mjs";
+import {WECHAT_COVER_SPECS} from "./wechat-cover-lib.mjs";
+import {inspectVideoAcceptance} from "./video-acceptance-lib.mjs";
 
 const args = parseArgs();
 if (!args.unit) { console.error("用法: node validate-content-unit.mjs --unit <内容单元路径>"); process.exit(2); }
 const paths = platformPaths(args.unit);
+const manifest = await exists(path.join(paths.ai,'manifest.json')) ? await readJson(path.join(paths.ai,'manifest.json')) : {};
+const defaultScope = manifest.scope ? [['xhs','xiaohongshu'],['wechat','wechat'],['voiceover','video']].filter(([,key])=>manifest.scope[key]).map(([p])=>p) : ['xhs','wechat','voiceover'];
+const requested = args.platform ? args.platform.split(',').map(p=>p.trim()) : defaultScope;
+if(!requested.length || requested.some(p=>!['xhs','wechat','voiceover','video'].includes(p)))throw new Error('Unknown platform');
 const checks = [];
 const add = (name, passed, detail = null, level = "error") => checks.push({name, passed: Boolean(passed), detail, level});
 
@@ -21,10 +29,14 @@ async function collectText(root) {
   for (const entry of await fs.readdir(root, {withFileTypes: true})) {
     const target = path.join(root, entry.name);
     if (entry.isDirectory()) await collectText(target);
-    else if (/\.(md|txt|json|html|js|css|srt|vtt)$/iu.test(entry.name) && !target.includes(`${path.sep}00-source${path.sep}`) && !target.includes(`${path.sep}90-archive${path.sep}`)) scanFiles.push(target);
+    else if (!entry.name.endsWith("report.json") && /\.(md|txt|html|srt|vtt)$/iu.test(entry.name) && !target.includes(`${path.sep}00-source${path.sep}`) && !target.includes(`${path.sep}90-archive${path.sep}`)) scanFiles.push(target);
   }
 }
-for (const root of [paths.xhs, paths.wechat, paths.video, paths.xhsFinal, paths.wechatFinal, paths.videoFinal]) await collectText(root);
+// Scan reader-facing outputs, not internal reports that may quote disallowed examples.
+for (const platform of requested.filter(p=>p!=='voiceover')) await collectText(path.join(paths[platform],'output'));
+if(requested.includes('voiceover')) for(const name of ['voiceover-draft.md','tts-input.txt']) {
+  const file=path.join(paths.video,name);if(await exists(file))scanFiles.push(file);
+}
 const identity = {};
 for (const file of scanFiles) {
   const hits = forbiddenHits(await fs.readFile(file, "utf8"));
@@ -33,6 +45,7 @@ for (const file of scanFiles) {
 add("public candidate identity scan is zero", Object.keys(identity).length === 0, identity);
 
 const xhsOut = path.join(paths.xhs, "output");
+if(requested.includes("xhs")) {
 if (await exists(xhsOut)) {
   const pages = (await fs.readdir(xhsOut)).filter((name) => /^page-\d{2}\.png$/u.test(name)).sort();
   const pageSizes = [];
@@ -46,15 +59,24 @@ if (await exists(xhsOut)) {
   add("xhs caption exists", await exists(path.join(xhsOut, "caption.md")));
 } else add("xhs candidate output exists", false);
 
+}
 const wechatOut = path.join(paths.wechat, "output");
+if(requested.includes("wechat")) {
 if (await exists(wechatOut)) {
-  const required = ["article.md", "article.html", "article-full.png", "share-copy.md"];
+  const required = ["article.md", "article.html", "article-full.png", "share-copy.md", WECHAT_COVER_SPECS.wide.file, WECHAT_COVER_SPECS.square.file];
   for (const name of required) add(`wechat ${name} exists`, await exists(path.join(wechatOut, name)));
+  for (const key of ["wide", "square"]) {
+    const spec = WECHAT_COVER_SPECS[key];
+    const file = path.join(wechatOut, spec.file);
+    const size = await exists(file) ? pngSize(await fs.readFile(file)) : null;
+    add(`wechat ${key} cover is ${spec.width}x${spec.height}`, size?.width === spec.width && size?.height === spec.height, size);
+  }
   const reportPath = path.join(wechatOut, "check-report.json");
   if (await exists(reportPath)) {
     const report = await readJson(reportPath);
     add(`wechat reader-visible body ${WECHAT_CHARACTER_RANGE.min}-${WECHAT_CHARACTER_RANGE.max}`, report.characterCount >= WECHAT_CHARACTER_RANGE.min && report.characterCount <= WECHAT_CHARACTER_RANGE.max, {characterCount: report.characterCount});
     add("wechat browser check passed", report.passed, report.errors);
+    add("wechat dual-cover report passed", report.cover?.passed === true, report.cover);
   } else add("wechat check report exists", false);
   const imageFiles = (await fs.readdir(wechatOut)).filter((name) => /^content-image\.(png|jpe?g|svg|webp)$/iu.test(name));
   add("wechat has substantive content image", imageFiles.length >= 1, imageFiles);
@@ -78,6 +100,8 @@ if (await exists(wechatOut)) {
   add("wechat fixed brand copy is present verbatim", lockedBrandCopy.every((line) => articleVisibleText.includes(line)), lockedBrandCopy.filter((line) => !articleVisibleText.includes(line)));
 } else add("wechat candidate output exists", false);
 
+}
+if(requested.includes("voiceover")) {
 const audioInbox = path.join(paths.video, "audio-inbox");
 const audioFiles = await exists(audioInbox) ? (await fs.readdir(audioInbox)).filter((name) => !name.startsWith(".")) : [];
 const draftPath = path.join(paths.video, "voiceover-draft.md");
@@ -91,56 +115,36 @@ if (await exists(draftPath) && await exists(ttsPath)) {
   add("video voiceover report exists", await exists(voiceoverReportPath));
   if (await exists(voiceoverReportPath)) {
     const storedVoiceover = await readJson(voiceoverReportPath);
-    add("video voiceover report is passed and current", storedVoiceover.passed === true
-      && storedVoiceover.fingerprints?.draftBody === liveVoiceover.fingerprints.draftBody
-      && storedVoiceover.fingerprints?.ttsInput === liveVoiceover.fingerprints.ttsInput,
-    {stored: storedVoiceover.fingerprints, current: liveVoiceover.fingerprints});
+    add("video voiceover report is passed and current", confirmedVoiceoverMatches(storedVoiceover, await fs.readFile(draftPath, "utf8"), await fs.readFile(ttsPath, "utf8")));
+
   }
 }
 if (!audioFiles.length) add("video waits for manually generated audio", true, "没有音频时不要求分镜或成片", "info");
 else add("video returned audio has follow-up report", await exists(path.join(paths.video, "audio-report.json")), audioFiles, "warning");
 
-const videoCandidate = path.join(paths.video, "output", "video-candidate.mp4");
-if (await exists(videoCandidate)) {
-  const videoCoverPath = path.join(paths.video, "output", "video-cover.png");
-  add("video standalone cover exists", await exists(videoCoverPath));
-  if (await exists(videoCoverPath)) {
-    const coverSize = pngSize(await fs.readFile(videoCoverPath));
-    add("video cover is 1080x1920", coverSize.width === 1080 && coverSize.height === 1920, coverSize);
-  }
-  const videoReportPath = path.join(paths.video, "output", "video-report.json");
-  add("video report exists", await exists(videoReportPath));
-  if (await exists(videoReportPath)) {
-    const videoReport = await readJson(videoReportPath);
-    add("video has no detected black-frame flashes", videoReport.checks?.temporal?.blackEvents?.length === 0, videoReport.checks?.temporal?.blackEvents);
-    add("video has no rapid one-frame flash pairs", videoReport.checks?.temporal?.rapidFlashPairs?.length === 0, videoReport.checks?.temporal?.rapidFlashPairs);
-    add("video subtitle boundaries do not reset full-frame transitions", videoReport.checks?.transitionPolicy === "画面只在镜头边界切换；字幕边界不做整帧淡入淡出或动画重置", videoReport.checks?.transitionPolicy);
-    add("video first frame is the validated cover", videoReport.checks?.cover?.passed === true && videoReport.checks?.cover?.firstFrameMatchesCover === true && videoReport.checks?.cover?.firstFrameSsim >= 0.98, videoReport.checks?.cover);
-  }
+}
+if(requested.includes("video")) {
+const videoOutput = path.join(paths.video, "output");
+const videoReportPath = path.join(videoOutput, "video-report.json");
+add("requested video candidate exists", await exists(path.join(videoOutput,"video-candidate.mp4")));
+const videoPromotionState = await exists(path.join(paths.ai, "state.json")) ? await readJson(path.join(paths.ai, "state.json")) : {};
+for (const [label, artifactDir] of [["candidate", videoOutput], ["final", paths.videoFinal]]) {
+  const hasVideo = await exists(path.join(artifactDir, "video-candidate.mp4"));
+  const hasCandidateReport = label === "candidate" && await exists(videoReportPath);
+  const hasFinalState = label === "final" && (Boolean(videoPromotionState.videoFinalAcceptance) || (await fs.readdir(paths.videoFinal).catch(() => [])).length > 0);
+  if (!hasVideo && !hasCandidateReport && !hasFinalState) continue;
+  const acceptance = await inspectVideoAcceptance({artifactDir, unitRoot: paths.unit, sourceMode: label, reportPath: videoReportPath, mixReportPath: path.join(videoOutput, "mix-report.json")});
+  for (const check of acceptance.checks) add(`video ${label}: ${check.name}`, check.passed);
 }
 
-const reviewReportPath = path.join(paths.review, "review-report.json");
-if (await exists(xhsOut) && await exists(wechatOut)) {
-  add("final review report exists", await exists(reviewReportPath));
-  if (await exists(reviewReportPath)) {
-    const reviewReport = await readJson(reviewReportPath);
-    add("final review is fully passed", reviewReport.passed, reviewReport.components);
-    const xhsComponent = reviewReport.components?.xhs;
-    const xhsMetrics = reviewReport.metrics?.xhs;
-    add("xhs copy is enabled only with visible valid pages", xhsComponent?.ready
-      ? xhsMetrics?.natural?.width === 1080 && xhsMetrics?.natural?.height === 1440 && xhsMetrics?.copyDisabled === false && xhsMetrics?.emptyVisible === false
-      : xhsMetrics?.copyDisabled === true && xhsMetrics?.emptyVisible === true, {component: xhsComponent, metrics: xhsMetrics});
-    const voiceoverComponent = reviewReport.components?.voiceover;
-    const voiceoverMetrics = reviewReport.metrics?.voiceover;
-    add("voiceover copy is enabled only with passed current machine稿", voiceoverComponent?.ready
-      ? voiceoverMetrics?.textLength > 0 && voiceoverMetrics?.copyDisabled === false && voiceoverMetrics?.emptyVisible === false
-      : voiceoverMetrics?.copyDisabled === true && voiceoverMetrics?.emptyVisible === true,
-    {component: voiceoverComponent, metrics: voiceoverMetrics});
-  }
 }
-
+for(const platform of requested.filter(p=>['xhs','wechat'].includes(p))) {
+  const integrity=await inspectGraphic({platform,unitRoot:paths.unit});
+  add(`${platform} current inputs and outputs match`,integrity.ready,integrity.reasons);
+}
+// A review page is an optional presentation, not a prerequisite for individual delivery.
 const failed = checks.filter((item) => !item.passed && item.level === "error");
-const report = {generatedAt: new Date().toISOString(), unit: paths.unit, summary: {passed: checks.filter((item) => item.passed).length, failed: failed.length, warnings: checks.filter((item) => !item.passed && item.level === "warning").length}, checks};
+const report = {generatedAt: new Date().toISOString(), unit: paths.unit, requested, summary: {passed: checks.filter((item) => item.passed).length, failed: failed.length, warnings: checks.filter((item) => !item.passed && item.level === "warning").length}, checks};
 await writeJson(path.join(paths.ai, "validation-report.json"), report);
 console.log(JSON.stringify(report.summary));
 if (failed.length) process.exitCode = 1;

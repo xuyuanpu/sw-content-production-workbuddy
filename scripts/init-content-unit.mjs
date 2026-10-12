@@ -8,6 +8,8 @@ if (!args.workspace || !args.topic) {
   process.exit(2);
 }
 
+const selected = [...new Set(String(args.platform || 'xhs,wechat,video').split(',').map(p => p.trim()))];
+if (!selected.length || selected.some(p => !['xhs','wechat','video'].includes(p))) throw new Error('平台应为 xhs、wechat、video，可用逗号组合');
 const workspace = path.resolve(args.workspace);
 const outputRoot = path.join(workspace, "output");
 const id = args.id ? Number(args.id) : await nextId(outputRoot);
@@ -43,17 +45,9 @@ if (args.source) {
 const xhs = path.join(unit, "AIworkspace", "20-xhs", "current");
 const wechat = path.join(unit, "AIworkspace", "30-wechat", "current");
 const video = path.join(unit, "AIworkspace", "40-video", "current");
-await copyTree(path.join(skillRoot, "assets", "templates", "xhs"), xhs);
-await copyTree(path.join(skillRoot, "assets", "templates", "wechat"), wechat);
-await copyTree(path.join(skillRoot, "assets", "templates", "video"), video);
-await ensureDir(path.join(unit, "AIworkspace", "10-shared-assets"));
-await fs.copyFile(path.join(skillRoot, "assets", "logo.png"), path.join(unit, "AIworkspace", "10-shared-assets", "logo.png"));
-for (const destination of [path.join(xhs, "assets", "logo.png"), path.join(wechat, "assets", "logo.png"), path.join(video, "assets", "logo.png")]) {
-  await ensureDir(path.dirname(destination));
-  await fs.copyFile(path.join(skillRoot, "assets", "logo.png"), destination);
-}
-for (const name of ["header.gif", "footer-group.png", "footer-channels.webp"]) {
-  await fs.copyFile(path.join(skillRoot, "assets", "brand", "wechat", name), path.join(wechat, "assets", `brand-${name}`));
+for(const platform of selected) {
+  const current={xhs,wechat,video}[platform];await ensureDir(current);
+  if(platform==='video') await fs.copyFile(path.join(skillRoot,'assets/templates/video/voiceover-draft.md'),path.join(current,'voiceover-draft.md'));
 }
 
 const manifest = {
@@ -64,10 +58,10 @@ const manifest = {
   brand: "SW / Skill&Will",
   narrative: "official-organization",
   sourceRecords,
-  scope: {xiaohongshu: true, wechat: true, video: true},
+  scope: {xiaohongshu: selected.includes("xhs"), wechat: selected.includes("wechat"), video: selected.includes("video")},
   status: {professionalReview: "pending", sourceAuthorization: "pending", brandReview: "pending", publishAuthorization: "pending"},
 };
 await writeJson(path.join(unit, "AIworkspace", "manifest.json"), manifest);
-await writeJson(path.join(unit, "AIworkspace", "state.json"), {stage: "initialized", updatedAt: new Date().toISOString(), xhs: "not-started", wechat: "not-started", video: "not-started"});
-await fs.writeFile(path.join(unit, "AIworkspace", "content-plan.md"), "# 统一编辑判断\n\n- 核心受众：\n- 真实问题：\n- 核心判断：\n- 来源证据：\n- SW 可承担的机构观点：\n- 专业边界：\n- 小红书入口：\n- 公众号解释：\n- 短视频冲突：\n- 待确认项：\n");
+await writeJson(path.join(unit, "AIworkspace", "state.json"), {stage: "initialized", updatedAt: new Date().toISOString(), ...Object.fromEntries(["xhs","wechat","video"].map(p => [p,selected.includes(p)?"not-started":"not-requested"]))});
+await fs.writeFile(path.join(unit, "AIworkspace", "content-plan.md"), ["# 本次内容判断", "", "- 原题／要回答的问题：", "- 给谁看／看完获得什么：", "- 已有依据／还缺什么：", "- 原题是否需改（无必要则保留）：", ...selected.map(p => `- ${{xhs:'小红书',wechat:'公众号',video:'口播'}[p]}表达角度：`), ""].join("\n"));
 console.log(JSON.stringify({unit, id: String(id).padStart(2, "0"), sourceRecords}, null, 2));

@@ -1,3 +1,4 @@
+import {fingerprintGraphic} from './graphic-integrity-lib.mjs';
 import fs from "node:fs/promises";
 import path from "node:path";
 import {pathToFileURL} from "node:url";
@@ -83,6 +84,7 @@ await fs.copyFile(path.join(xhs, "caption.md"), path.join(out, "caption.md"));
 const dimensions = {};
 for (const file of (await fs.readdir(out)).filter((name) => name.endsWith(".png"))) dimensions[file] = pngSize(await fs.readFile(path.join(out, file)));
 const report = {generatedAt: new Date().toISOString(), pageCount: content.pages.length, dimensions, ...diagnostics, passed: diagnostics.consoleErrors.length === 0 && diagnostics.pageErrors.length === 0 && diagnostics.remoteResources.length === 0};
+report.provenance = await fingerprintGraphic("xhs", xhs, out);
 await writeJson(path.join(out, "check-report.json"), report);
 if (!report.passed) throw new Error(`小红书渲染检查失败: ${JSON.stringify(diagnostics)}`);
 console.log(JSON.stringify({status: "xhs-candidate-ready", output: out, pageCount: content.pages.length, long: dimensions["carousel-long.png"]}, null, 2));

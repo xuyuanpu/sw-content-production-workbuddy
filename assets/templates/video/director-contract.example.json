@@ -1,0 +1,90 @@
+{
+  "exampleNote": "仅演示字段；按当前确认稿和真实词级证据编写 scenes.json。解释点按实际内容选择，编译器派生知识索引与导演视图；不为模板补造案例或边界。 正文自由使用 composition 组合组件，参见 references/component-library.md；本例封面不是正文镜头选型模板。",
+  "film": {
+    "audience": "第一次使用测评的观众",
+    "viewerChange": "知道参考结果与个人判断的区别",
+    "throughline": "一个结果如何进入理解过程",
+    "cover": {
+      "subject": "参与者阅读自己的测评报告",
+      "action": "指着报告中的一项结果继续询问",
+      "topicLink": "对应拿到报告后仍需理解结果的主题"
+    },
+    "visualDivision": "主题图交代场景，原生对照呈现功能区别",
+    "sound": "沿用固定品牌混音，正文使用确认后的真实人声"
+  },
+  "video": {
+    "directorVersion": 1,
+    "width": 1080,
+    "height": 1920,
+    "fps": 30,
+    "duration": 10,
+    "audio": "working-audio.wav",
+    "timingEvidence": "asr-evidence.json",
+    "brandBgm": "assets/bgm/sw-brand-bgm.mp3",
+    "authoritativeScript": "final-voiceover.md",
+    "alignmentReport": "alignment-report.json",
+    "visualStyle": "content-driven"
+  },
+  "scenes": [
+    {
+      "id": "s1",
+      "visual": "cover",
+      "titleLines": [
+        "得到结果之后",
+        "还需要理解自己"
+      ],
+      "direction": {
+        "knowledgeBeats": [
+          "B-01"
+        ],
+        "viewerBefore": "把拿到结果当成了解自己",
+        "viewerAfter": "意识到结果只是理解的入口",
+        "visualStory": "直接呈现核心问题，留出阅读时间",
+        "openingFrame": "标题位于中央安全区",
+        "closingFrame": "标题保留后交给解释过程",
+        "primaryVisualJob": "orient",
+        "handoff": {
+          "fromPrevious": "从问题建立本片起点",
+          "toNext": "将结果交给下一镜解释"
+        }
+      },
+      "beats": [
+        {
+          "anchor": {
+            "text": "得到结果",
+            "occurrence": 1
+          },
+          "target": "scene",
+          "action": "hold",
+          "relation": "标题承接口播问题",
+          "visualStateAfter": "观众读完标题并准备理解下一步"
+        }
+      ],
+      "asset": "assets/cover.png"
+    }
+  ],
+  "captions": [
+    {
+      "text": "得到结果之后，还需要理解自己。",
+      "from": {
+        "text": "得到结果",
+        "occurrence": 1
+      },
+      "to": {
+        "text": "理解自己",
+        "occurrence": 1
+      }
+    }
+  ],
+  "explanations": [
+    {
+      "id": "B-01",
+      "operation": "orient",
+      "evidence": "S-01确认来源",
+      "visualBasis": "核心问题直接进入中央",
+      "why": "让观众先明确这一条要回答的问题",
+      "sceneId": "s1",
+      "forbiddenFallback": "不能让空图片框占据开场"
+    }
+  ]
+}

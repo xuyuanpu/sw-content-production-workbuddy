@@ -35,3 +35,7 @@ body { background: #ece8e4; }
 .prose p + p { margin-top:30px; }
 .prose strong { font-weight:700; color:var(--accent); }
 .closing-note { margin-top:32px; padding:20px 24px; border-left:5px solid var(--accent); background:#f6e8e8; font-size:32px; line-height:1.58; }
+.article-stream.figure-page { display:flex; flex-direction:column; }
+.article-stream.figure-page .figure-heading { margin-bottom:24px; }
+.article-stream.figure-page .article-figure.full-figure { flex:1; display:flex; flex-direction:column; margin:0; padding:14px; min-height:0; }
+.article-stream.figure-page .article-figure.full-figure img { flex:1; width:100%; min-height:0; max-height:none; object-fit:contain; object-position:center; filter:none; }

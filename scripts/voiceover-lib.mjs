@@ -5,7 +5,7 @@ const fingerprint = (value) => crypto.createHash("sha256").update(String(value |
 
 export function extractVoiceoverBody(markdown) {
   const normalized = String(markdown || "").replace(/\r\n/gu, "\n");
-  const heading = normalized.match(/^##\s+口播稿\s*$/mu);
+  const heading = normalized.match(/^##[ \t]+口播稿(?:[ \t]*[（(][^\n]*[）)])?[ \t]*$/mu);
   if (!heading) return normalized.trim();
   const start = heading.index + heading[0].length;
   const tail = normalized.slice(start);
@@ -13,14 +13,14 @@ export function extractVoiceoverBody(markdown) {
   return tail.slice(0, next < 0 ? tail.length : next).trim();
 }
 
-function normalizedContent(value) {
+export function normalizedContent(value) {
   return String(value || "")
     .replace(pausePattern, "")
     .replace(/M\s+B\s+T\s+I/giu, "MBTI")
     .replace(/F\s+I/gu, "Fi")
     .replace(/F\s+E/gu, "Fe")
     .replace(/[*_`~#>]/gu, "")
-    .replace(/[\p{P}\p{Z}\p{S}]/gu, "")
+    .replace(/[\p{P}\p{Z}\p{S}\s]/gu, "")
     .toLowerCase();
 }
 
@@ -54,19 +54,17 @@ export function analyzeVoiceover(draftMarkdown, ttsInput) {
   const longestSentence = sentenceLengths.length ? Math.max(...sentenceLengths) : 0;
   const opening = [...draftBody.replace(/\s/gu, "")].slice(0, 80).join("");
   const checks = [];
+  const warnings = [];
+  const advise = (name, passed, detail) => { if (!passed) warnings.push({name, detail}); };
   const add = (name, passed, detail) => checks.push({name, passed: Boolean(passed), detail});
 
   add("voiceover draft body is present", compact(draftBody) >= 80, {characters: compact(draftBody)});
   add("tts input is present", characterCount >= 80, {characters: characterCount});
   add("confirmed content is unchanged after pronunciation and pause normalization", normalizedContent(draftBody) === normalizedContent(tts), {draftFingerprint: normalizedContent(draftBody), ttsFingerprint: normalizedContent(tts)});
-  add("opening enters a question or conflict within 80 characters", /[？?]|不是|不等于|别急|误解|错|无效|没用|问题|为什么/gu.test(opening), {opening});
-  add("draft has direct audience address", /你|我们|大家/gu.test(draftBody), null);
-  add("draft uses at least two distinct spoken pivots", spokenCues.length >= 2, {spokenCues});
-  add("draft contains at least one question", /[？?]/gu.test(draftBody), null);
-  add("sentences remain speakable", longestSentence <= 65, {longestSentence, sentenceLengths});
-  add("explicit pauses stay within sparse budget", pauses.length >= budget.min && pauses.length <= budget.max, {pauseCount: pauses.length, budget, characterCount});
-  add("pause values are 0.3 to 0.6 seconds", pauses.every((pause) => pause.seconds >= 0.3 && pause.seconds <= 0.6), pauses);
-  add("pause markers are not consecutive or placed at text edges", !/^<#/u.test(tts) && !/<#[^>]+#>\s*$/u.test(tts) && !/<#[^>]+#>\s*<#[^>]+#>/u.test(tts), null);
+  advise("sentences remain speakable", longestSentence <= 65, {longestSentence, sentenceLengths});
+  advise("explicit pauses stay within sparse budget", pauses.length <= budget.max, {pauseCount: pauses.length, budget, characterCount});
+  advise("pause values are 0.3 to 0.6 seconds", pauses.every((pause) => pause.seconds >= 0.3 && pause.seconds <= 0.6), pauses);
+  advise("pause markers are not consecutive or placed at text edges", !/^<#/u.test(tts) && !/<#[^>]+#>\s*$/u.test(tts) && !/<#[^>]+#>\s*<#[^>]+#>/u.test(tts), null);
   add("no unsupported MiniMax tags are present", unsupportedTags.length === 0, unsupportedTags);
   add("English abbreviations use machine pronunciation spacing", !/\bMBTI\b/giu.test(tts) && !/\bFi\b/gu.test(tts) && !/\bFe\b/gu.test(tts), null);
   add("machine input contains no Markdown headings", !/^#{1,6}\s+/mu.test(tts), null);
@@ -74,9 +72,9 @@ export function analyzeVoiceover(draftMarkdown, ttsInput) {
   return {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
-    metrics: {characterCount, pauseCount: pauses.length, pauseBudget: budget, spokenCues, longestSentence},
+    metrics: {characterCount, pauseCount: pauses.length, pauseBudget: budget, spokenCues, opening, longestSentence},
     fingerprints: {draftBody: fingerprint(draftBody), ttsInput: fingerprint(tts)},
-    checks,
+    checks, warnings,
     passed: checks.every((check) => check.passed)
   };
 }

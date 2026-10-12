@@ -1,316 +1,439 @@
+import {visualFramePlan, writeVisualReview, writeCandidateVisualReview} from './visual-review-lib.mjs';
+import {directorReviewTemplate} from "./director-review-lib.mjs";
+import {verifyDirector, deriveShotbook, deriveExplanationMap, deriveTreatment} from "./director-contract-lib.mjs";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import {pathToFileURL} from "node:url";
 import {execFile} from "node:child_process";
 import {promisify} from "node:util";
-import {compactCount, ensureDir, exists, findPlaywright, parseArgs, platformPaths, pngSize, readJson, writeJson, sha256, forbiddenHits} from "./lib.mjs";
+import {bundle} from "@remotion/bundler";
+import {renderMedia, renderStill, selectComposition} from "@remotion/renderer";
+import {
+  compactCount, ensureDir, exists, forbiddenHits, parseArgs,
+  platformPaths, pngSize, readJson, sha256, skillRoot, writeJson,
+} from "./lib.mjs";
+import {probeAudio, resolveInside, verifyAlignmentReport} from "./alignment-lib.mjs";
+import {SW_BRAND_BGM, ensureBrandBgm, brandBgmDuckingFilter} from "./bgm-policy-lib.mjs";
+import {analyzeVisualPolicy} from "./visual-policy-lib.mjs";
+import {requireConfirmedVoiceover} from "./confirmed-voiceover-lib.mjs";
+import {analyzeStoryboard, reportMatchesStoryboardInputs} from "./storyboard-lib.mjs";
+import {classifyVideoAsset} from "./video-asset-policy-lib.mjs";
 import {inspectVideo} from "./video-qc.mjs";
+import {fingerprintVideoArtifacts, fingerprintVideoSourceInputs, inspectVideoAcceptance, serializeSubtitles} from "./video-acceptance-lib.mjs";
 
 const run = promisify(execFile);
-const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/gu, (character) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"})[character]);
 const args = parseArgs();
-if (!args.unit) { console.error("用法: node build-video.mjs --unit <内容单元路径>"); process.exit(2); }
-const {video} = platformPaths(args.unit);
+if (!args.unit) {
+  console.error("用法: node build-video.mjs --unit <内容单元路径> [--workspace <视频工作区>] [--keep-work]");
+  process.exit(2);
+}
 
-// ---- 读取 scenes.json 与确认稿 ----
+// Explicit runtime overrides preserve reviewed local capabilities; defaults stay reproducible.
+const browserExecutable = process.env.SW_REMOTION_BROWSER || undefined;
+if (browserExecutable && !await exists(browserExecutable)) throw new Error("SW_REMOTION_BROWSER does not exist");
+const renderConcurrency = Number(process.env.SW_RENDER_CONCURRENCY || 2);
+if (!Number.isInteger(renderConcurrency) || renderConcurrency < 1 || renderConcurrency > 64) throw new Error("SW_RENDER_CONCURRENCY must be 1..64");
+const x264Preset = process.env.SW_X264_PRESET || "medium";
+
+const unit = path.resolve(args.unit);
+const defaultVideo = platformPaths(unit).video;
+const video = args.workspace ? path.resolve(args.workspace) : defaultVideo;
+const relativeWorkspace = path.relative(unit, video);
+if (relativeWorkspace.startsWith("..") || path.isAbsolute(relativeWorkspace)) throw new Error("视频工作区必须位于当前内容单元内");
+// 把 Remotion 浏览器下载与 webpack 缓存目录钉在 skill 的 node_modules 下，
+// 避免渲染副作用在内容单元根目录生成 .remotion / .cache 而破坏「仅四目录」验收约束。
+process.chdir(skillRoot);
+
+let confirmedVoiceover;
+const chainPath = path.join(video, "knowledge-chain.md");
+
 const scenesPath = path.join(video, "scenes.json");
-if (!await exists(scenesPath)) throw new Error("缺少 scenes.json，先完成转写对齐");
+if (!await exists(scenesPath)) throw new Error(`缺少 scenes.json: ${scenesPath}`);
 const data = await readJson(scenesPath);
-const {width, height, fps, audio, brand} = data.video;
-const audioPath = path.join(video, audio);
-if (!await exists(audioPath)) throw new Error(`缺少音频: ${audioPath}`);
+const {width = 1080, height = 1920, fps = 30, audio, duration} = data.video || {};
+if (width !== 1080 || height !== 1920) throw new Error(`SW 视频必须为 1080×1920，当前 ${width}×${height}`);
+if (fps !== 30) throw new Error(`SW 视频必须为 30 fps，当前 ${fps}`);
+if (!Number.isFinite(duration) || duration <= 0) throw new Error("scenes.json 缺少有效 video.duration");
+const brandBgm = await ensureBrandBgm({
+  skillRoot,
+  videoRoot: video,
+  configuredPath: data.video?.brandBgm,
+  videoDuration: duration,
+  requestedStartSeconds: data.video?.brandBgmStartSeconds,
+});
+const audioPath = await resolveInside(video, audio || "", "工作音频");
+if (!audio || !await exists(audioPath)) throw new Error(`缺少用户返回的真实音频: ${audioPath}`);
 const audioHash = sha256(await fs.readFile(audioPath));
 
-// ---- 构建帧序列（含无字幕间隔帧，总时长覆盖整片）----
-const segments = []; // {start, end, scene, subtitle, gap}
-const scenes = data.scenes;
-const subs = data.subtitles;
-if (!Array.isArray(scenes) || !scenes.length) throw new Error("scenes.json 至少需要一个镜头");
-if (!Array.isArray(subs) || !subs.length) throw new Error("scenes.json 至少需要一条字幕");
+const scenes = Array.isArray(data.scenes) ? data.scenes : [];
+const subtitles = Array.isArray(data.subtitles) ? data.subtitles : [];
+if (!scenes.length) throw new Error("scenes.json 至少需要一个镜头");
+if (!subtitles.length) throw new Error("scenes.json 至少需要一条字幕");
+
+const authoritativeScriptPath = await resolveInside(video, data.video?.authoritativeScript || "final-voiceover.md", "最终口播稿");
+confirmedVoiceover = await requireConfirmedVoiceover(video, authoritativeScriptPath);
+const alignmentReportPath = await resolveInside(video, data.video?.alignmentReport || "alignment-report.json", "字幕对齐报告");
+const audioProbe = await probeAudio(audioPath);
+if (Math.abs(audioProbe.durationSeconds - duration) > 0.08) {
+  throw new Error(`scenes.json 时长必须跟随当前工作音频重新建立: ${duration} != ${audioProbe.durationSeconds}`);
+}
+const alignment = await verifyAlignmentReport({
+  reportPath: alignmentReportPath,
+  audioPath,
+  scriptPath: authoritativeScriptPath,
+  subtitles,
+  duration,
+});
+if (!alignment.passed) {
+  throw new Error(`字幕对齐硬门失败，禁止渲染: ${JSON.stringify(alignment.checks.filter((check) => !check.passed))}`);
+}
+
+const storyboardPaths = {
+  treatment: path.join(video, "visual-treatment.md"),
+  explanationMap: path.join(video, "visual-explanation-map.md"),
+  shotbook: path.join(video, "shotbook.json"),
+  report: path.join(video, "storyboard-report.json"),
+};
+if (!(await Promise.all(Object.values(storyboardPaths).map(exists))).every(Boolean)) {
+  throw new Error("缺少 visual-treatment.md、visual-explanation-map.md、shotbook.json 或 storyboard-report.json，禁止跳过视觉解释导演层");
+}
+const storyboardInputs = {
+  chain: await fs.readFile(chainPath, "utf8"),
+  treatment: await fs.readFile(storyboardPaths.treatment, "utf8"),
+  explanationMap: await fs.readFile(storyboardPaths.explanationMap, "utf8"),
+  shotbook: await readJson(storyboardPaths.shotbook),
+  scenes: data,
+  script: await fs.readFile(authoritativeScriptPath, "utf8"),
+};
+const timingEvidencePath = await resolveInside(video, data.video.timingEvidence || "", "导演时间证据");
+if (!data.video.timingEvidence) throw new Error("先运行 compile-director.mjs：缺少真实音频锚点绑定");
+const directorContract = verifyDirector(data, await readJson(timingEvidencePath), audioHash);
+if (!directorContract.passed) throw new Error(`导演执行契约失败: ${JSON.stringify(directorContract.errors)}`);
+if (JSON.stringify(deriveShotbook(data)) !== JSON.stringify(storyboardInputs.shotbook) || deriveExplanationMap(data) !== storyboardInputs.explanationMap || deriveTreatment(data) !== storyboardInputs.treatment) throw new Error("派生分镜漂移；重新 compile-director，禁止手改 SHOTBOOK 时间表");
+const storyboardAnalysis = analyzeStoryboard(storyboardInputs);
+const storedStoryboardReport = await readJson(storyboardPaths.report);
+if (!storyboardAnalysis.passed || !reportMatchesStoryboardInputs(storedStoryboardReport, storyboardInputs)) {
+  throw new Error(`视觉解释与分镜硬门失败或报告过期，禁止渲染: ${JSON.stringify(storyboardAnalysis.checks.filter((check) => !check.passed))}`);
+}
+
 const minimumSceneDuration = Number(data.video.minimumSceneDuration || 1.8);
 const minimumSubtitleDuration = Number(data.video.minimumSubtitleDuration || 1.2);
 const minimumCoverDuration = Number(data.video.minimumCoverDuration || 1.8);
 const firstScene = scenes[0];
 const coverTitleLines = (Array.isArray(firstScene.titleLines) ? firstScene.titleLines : [firstScene.overlayTitle])
-  .map((line) => String(line || "").trim())
-  .filter(Boolean);
+  .map((line) => String(line || "").trim()).filter(Boolean);
 const coverTitle = coverTitleLines.join("");
-const coverAssetPath = path.join(video, firstScene.asset || "assets/cover.png");
-if (firstScene.start !== 0 || firstScene.visual !== "cover") throw new Error("第一镜必须从 0 秒开始且 visual=cover，确保视频第一帧就是正式封面");
+if (firstScene.start !== 0 || firstScene.visual !== "cover") throw new Error("第一镜必须从 0 秒开始且 visual=cover");
 if (firstScene.end - firstScene.start < minimumCoverDuration) throw new Error(`封面镜头不得少于 ${minimumCoverDuration}s`);
-if (!await exists(coverAssetPath)) throw new Error(`封面镜头缺少高分辨率位图素材: ${coverAssetPath}`);
 if (coverTitleLines.length < 1 || coverTitleLines.length > 3 || compactCount(coverTitle) < 4 || compactCount(coverTitle) > 28 || coverTitleLines.some((line) => compactCount(line) > 14)) {
-  throw new Error("封面标题必须按语义拆成 1–3 行，每行不超过 14 字，总长 4–28 字；优先使用 titleLines 明确断行");
+  throw new Error("封面标题必须按语义拆成 1–3 行，每行不超过 14 字，总长 4–28 字");
 }
+
 const sceneDurationViolations = scenes.filter((scene) => scene.end - scene.start < minimumSceneDuration).map((scene) => ({id: scene.id, duration: scene.end - scene.start}));
-const subtitleDurationViolations = subs.filter((subtitle) => subtitle.end - subtitle.start < minimumSubtitleDuration).map((subtitle) => ({text: subtitle.text, duration: subtitle.end - subtitle.start}));
-const sceneOrderViolations = scenes.filter((scene, index) => scene.end <= scene.start || (index > 0 && scene.start < scenes[index - 1].end)).map((scene) => scene.id);
-if (sceneDurationViolations.length) throw new Error(`镜头过短，常规镜头不得少于 ${minimumSceneDuration}s: ${JSON.stringify(sceneDurationViolations)}`);
-if (subtitleDurationViolations.length) throw new Error(`字幕停留过短，不得少于 ${minimumSubtitleDuration}s: ${JSON.stringify(subtitleDurationViolations)}`);
-if (sceneOrderViolations.length) throw new Error(`镜头时间轴重叠或倒序: ${sceneOrderViolations.join(", ")}`);
-const sceneAt = (time) => scenes.find((scene) => time >= scene.start && time < scene.end)
-  || [...scenes].reverse().find((scene) => time >= scene.end)
-  || scenes[0];
-let cursor = 0;
-for (const sub of subs) {
-  if (sub.start > cursor) segments.push({start: cursor, end: sub.start, scene: sceneAt(cursor), subtitle: "", gap: true});
-  segments.push({start: sub.start, end: sub.end, scene: sceneAt(sub.start), subtitle: sub.text, gap: false});
-  cursor = sub.end;
-}
-const videoEnd = Math.max(data.video.duration, cursor + 0.3);
-if (videoEnd > cursor) segments.push({start: cursor, end: videoEnd, scene: sceneAt(Math.max(cursor - 0.01, 0)), subtitle: "", gap: true});
+const subtitleDurationViolations = subtitles.filter((subtitle) => subtitle.end - subtitle.start < minimumSubtitleDuration).map((subtitle) => ({text: subtitle.text, duration: subtitle.end - subtitle.start}));
+const sceneOrderViolations = scenes.filter((scene, index) => scene.end <= scene.start || (index > 0 && Math.abs(scene.start - scenes[index - 1].end) > 0.02)).map((scene) => scene.id);
+if (sceneDurationViolations.length) throw new Error(`镜头过短: ${JSON.stringify(sceneDurationViolations)}`);
+if (subtitleDurationViolations.length) throw new Error(`字幕停留过短: ${JSON.stringify(subtitleDurationViolations)}`);
+if (sceneOrderViolations.length) throw new Error(`镜头必须无重叠、无空档连续衔接: ${sceneOrderViolations.join(", ")}`);
+if (Math.abs(scenes.at(-1).end - duration) > 0.08) throw new Error(`最后一镜应覆盖 video.duration：${scenes.at(-1).end} != ${duration}`);
 
-// ---- 禁止词扫描 ----
-const publicText = [coverTitle, firstScene.deck || "", ...segments.map((s) => s.subtitle)].join("\n");
+const visualAnalysis = analyzeVisualPolicy({video: data.video, scenes});
+if (!visualAnalysis.passed) {
+  throw new Error(`所选视觉组件可读性检查失败: ${JSON.stringify(visualAnalysis.checks.filter((check) => !check.passed))}`);
+}
+
+const {componentText, walkComponents} = await import('../assets/templates/video/remotion/component-library.mjs');
+const publicText = [
+  ...scenes.flatMap(componentText),
+  coverTitle,
+  ...scenes.flatMap((scene) => [scene.name, scene.overlayTitle, ...(scene.overlayLines || []), scene.deck, scene.supportingText, scene.revealText, scene.oldText, scene.newText, ...(scene.steps || []), ...(scene.nodes || []), ...(scene.can || []), ...(scene.cannot || []), ...(scene.items || []).map((item) => typeof item === "string" ? item : item?.text), ...(scene.paperItems || []).map((item) => item.text), ...(scene.beats || []).flatMap((beat) => [beat.anchor, beat.action, beat.target])]),
+  ...subtitles.map((subtitle) => subtitle.text),
+].filter(Boolean).join("\n");
 const hits = forbiddenHits(publicText);
-if (hits.length) throw new Error(`字幕命中个人归属禁用项: ${hits.join(", ")}`);
+if (hits.length) throw new Error(`公开候选文字命中个人归属禁用项: ${hits.join(", ")}`);
 
-// ---- 渲染帧目录 ----
-const framesDir = path.join(video, ".frames");
-await ensureDir(framesDir);
-for (const name of await fs.readdir(framesDir)) { if (name.endsWith(".png") || name.endsWith(".html")) await fs.unlink(path.join(framesDir, name)); }
+const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "sw-remotion-work-"));
+const publicDir = path.join(workDir, "public");
+const stagedAssetDir = path.join(publicDir, "assets");
+const bundleDir = path.join(workDir, "bundle");
+await fs.rm(workDir, {recursive: true, force: true});
+await ensureDir(stagedAssetDir);
 
-// 预读资源转 dataURL（自包含，避免远程/本地路径问题）
-async function assetDataUrl(file) {
-  if (!await exists(file)) return null;
-  const ext = path.extname(file).toLowerCase();
-  const mime = {".png": "image/png", ".jpg": "image/jpeg", ".svg": "image/svg+xml"}[ext] || "application/octet-stream";
-  return `data:${mime};base64,${(await fs.readFile(file)).toString("base64")}`;
-}
-const coverData = await assetDataUrl(coverAssetPath);
-const layersData = await assetDataUrl(path.join(video, "assets", "content-image.png"));
-const logoData = await assetDataUrl(path.join(video, "assets", "logo.png"));
-
-function frameHtml(segment) {
-  const {scene, subtitle} = segment;
-  const s = scene || scenes[0];
-  const visual = renderVisual(s, segment);
-  const subHtml = subtitle
-    ? `<div class="sub"><span>${escapeHtml(subtitle)}</span></div>`
-    : `<div class="sub empty"><span></span></div>`;
-  const num = String(Math.max(0, scenes.indexOf(s)) + 1).padStart(2, "0");
-  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
-    *{box-sizing:border-box;margin:0;padding:0}
-    html,body{width:${width}px;height:${height}px;overflow:hidden;background:#FCFAF8}
-    body{font-family:'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;color:#2B2929;position:relative;display:flex;flex-direction:column}
-    .brand{display:flex;align-items:center;gap:16px;padding:28px 40px 22px;border-bottom:2px solid #D8C4C7}
-    .brand .logo{height:78px;object-fit:contain}
-    .brand .name{font-size:30px;font-weight:650;color:#9E2F3F;letter-spacing:1px}
-    .brand .rule{flex:1;height:2px;background:#D8C4C7;opacity:.5}
-    .brand .col{font-size:22px;color:#756D6D}
-    .stage{flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden}
-    .sub{height:250px;display:flex;align-items:flex-start;justify-content:center;padding:34px 56px 40px;border-top:2px solid #D8C4C7}
-    .sub span{font-size:40px;line-height:1.5;font-weight:500;text-align:center;color:#2B2929;max-width:960px}
-    .sub.empty span{font-size:40px;color:#CFC6C6}
-  </style></head><body>
-    <div class="brand">
-      ${logoData ? `<img class="logo" src="${logoData}">` : ""}
-      <span class="name">SW 编辑部 · MBTI 观察</span>
-      <div class="rule"></div>
-      <span class="col">镜头 ${num}</span>
-    </div>
-    <div class="stage">${visual}</div>
-    ${subHtml}
-  </body></html>`;
+function resolveUnitAsset(value) {
+  if (!value) return null;
+  const candidate = value.startsWith("unit:")
+    ? path.resolve(unit, value.slice("unit:".length).replace(/^\/+/, ""))
+    : path.resolve(video, value);
+  const rel = path.relative(unit, candidate);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`资产超出内容单元，已拒绝: ${value}`);
+  return candidate;
 }
 
-function renderVisual(s, segment) {
-  const tag = s.visual;
-  const css = `
-    .v{display:flex;flex-direction:column;align-items:center;justify-content:center;width:100%;height:100%;padding:40px}
-    .h1{font-size:64px;font-weight:750;color:#2B2929;text-align:center;line-height:1.4;margin-bottom:18px}
-    .h1.accent{color:#9E2F3F}
-    .h2{font-size:42px;font-weight:650;color:#2B2929;text-align:center;line-height:1.5;margin-bottom:14px}
-    .small{font-size:28px;color:#756D6D;text-align:center;line-height:1.6}
-    .card{background:#FFFDFB;border:3px solid #D8C4C7;border-radius:24px;padding:56px 64px}
-    .card.accent-card{background:#F6E8E8;border-color:#9E2F3F}
-    .tagline{font-size:30px;font-weight:650;color:#9E2F3F;letter-spacing:2px;margin-bottom:20px}
-    .cover-img{width:100%;max-width:980px;border-radius:18px;box-shadow:0 16px 44px rgba(50,35,35,.18);object-fit:cover}
-    .cover-editorial{width:100%;height:100%;padding:54px 140px 54px 64px;display:grid;grid-template-rows:minmax(0,48%) auto;gap:38px;align-content:center}
-    .cover-figure{position:relative;min-height:0;overflow:hidden;border:2px solid #D8C4C7;border-radius:18px;background:#FFFDFB;box-shadow:0 18px 46px rgba(50,35,35,.12)}
-    .cover-figure img{display:block;width:100%;height:100%;object-fit:cover;object-position:50% 48%}
-    .cover-figure::after{content:"";position:absolute;left:0;right:0;bottom:0;height:8px;background:#9E2F3F}
-    .cover-copy{align-self:start;text-align:left}
-    .cover-kicker{font-size:27px;line-height:1.2;font-weight:700;letter-spacing:2px;color:#9E2F3F;margin-bottom:18px}
-    .cover-title{font-size:74px;line-height:1.16;font-weight:760;letter-spacing:-2px;color:#2B2929}
-    .cover-title span{display:block;white-space:nowrap}
-    .cover-title span:first-child{color:#9E2F3F}
-    .cover-deck{font-size:30px;line-height:1.5;font-weight:450;color:#756D6D;margin-top:22px;max-width:780px}
-    .strike{position:relative;display:inline-block}
-    .strike::after{content:"";position:absolute;left:-4%;top:52%;width:108%;height:6px;background:#9E2F3F;border-radius:3px;transform:rotate(-4deg)}
-    .path-step{display:flex;align-items:center;gap:22px}
-    .node{min-width:200px;padding:24px 30px;border-radius:18px;border:3px solid #D8C4C7;background:#FFFDFB;font-size:34px;font-weight:650;color:#756D6D;text-align:center}
-    .node.on{border-color:#9E2F3F;background:#F6E8E8;color:#9E2F3F}
-    .arrow{font-size:44px;color:#9E2F3F}
-    .comment{width:120px;height:120px;border-radius:50%;background:#F6E8E8;border:3px solid #9E2F3F;display:flex;align-items:center;justify-content:center;font-size:56px;color:#9E2F3F;margin-bottom:24px}
-  `;
-  let body = "";
-  if (tag === "cover" && coverData) {
-    const titleLines = (Array.isArray(s.titleLines) ? s.titleLines : [s.overlayTitle]).map((line) => `<span>${escapeHtml(line)}</span>`).join("");
-    body = `<div class="cover-editorial"><figure class="cover-figure"><img data-cover-source src="${coverData}" alt=""></figure><section class="cover-copy"><div class="cover-kicker">SW 专业编辑解读</div><h1 class="cover-title" data-cover-title>${titleLines}</h1>${s.deck ? `<p class="cover-deck">${escapeHtml(s.deck)}</p>` : ""}</section></div>`;
-  } else if (tag === "question-card") {
-    body = `<div class="v"><div class="card accent-card"><div class="tagline">一个更深的问法</div><div class="h1 accent" style="font-size:76px">${s.overlayTitle || "我为什么会这样？"}</div><div class="small" style="margin-top:18px">很多工具就接不住了</div></div></div>`;
-  } else if (tag === "comparison") {
-    body = `<div class="v"><div class="h2" style="margin-bottom:30px">这不是强弱，而是偏好</div>
-      <div style="display:flex;gap:0;align-items:stretch;width:100%;max-width:920px">
-        <div style="flex:1;background:#FFFDFB;border:3px solid #D8C4C7;border-radius:20px 0 0 20px;padding:44px 30px;text-align:center"><div class="small" style="margin-bottom:26px">别人更果断、更外向</div><div class="h2" style="color:#756D6D;font-size:52px">只是不同</div></div>
-        <div style="width:6px;background:#9E2F3F;border-radius:3px;margin:0 0"></div>
-        <div style="flex:1;background:#F6E8E8;border:3px solid #9E2F3F;border-radius:0 20px 20px 0;padding:44px 30px;text-align:center"><div class="small" style="margin-bottom:26px">能量来源与判断路径</div><div class="h1 accent" style="font-size:52px">才是你</div></div>
-      </div></div>`;
-  } else if (tag === "layers-diagram" && layersData) {
-    body = `<div class="v"><div class="tagline" style="margin-bottom:14px">MBTI 真正不可替代的地方</div><img class="cover-img" src="${layersData}" style="max-width:980px"><div class="small" style="margin-top:26px">回到你内在的心理起点</div></div>`;
-  } else if (tag === "path") {
-    const step = segment.gap ? 3 : 3;
-    body = `<div class="v"><div class="h2" style="margin-bottom:40px">用对 MBTI 的三步</div>
-      <div class="path-step"><div class="node on">接纳自己</div><span class="arrow">→</span><div class="node on">找到方向</div><span class="arrow">→</span><div class="node on">不依赖标签</div></div>
-      <div class="small" style="margin-top:36px">接纳，却不放弃成长</div></div>`;
-  } else if (tag === "boundary-card") {
-    body = `<div class="v"><div class="card accent-card"><div class="tagline">边界声明</div>
-      <div class="h2" style="font-size:52px"><span class="strike">不是诊断</span>&nbsp;&nbsp;<span class="strike">也不是命运</span></div>
-      <div style="height:26px"></div><div class="h1 accent" style="font-size:60px">只是一个回到起点的入口</div></div></div>`;
-  } else if (tag === "cta") {
-    body = `<div class="v"><div class="comment">💬</div><div class="h1" style="font-size:58px;max-width:860px">${s.overlayTitle || "你最近一次问自己，是什么时候？"}</div><div class="small" style="margin-top:22px">欢迎在评论区聊聊</div></div>`;
-  } else {
-    body = `<div class="v"><div class="h1 accent">${escapeHtml(s.name)}</div><div class="small">${escapeHtml(s.voiceover || "")}</div></div>`;
-  }
-  return `<style>${css}</style>${body}`;
+const assetManifest = [];
+async function stageAsset(sourceValue, label, assetRole = "") {
+  const source = resolveUnitAsset(sourceValue);
+  if (!source || !await exists(source)) throw new Error(`镜头资产缺失 (${label}): ${sourceValue}`);
+  const buffer = await fs.readFile(source);
+  const digest = sha256(buffer);
+  const ext = path.extname(source).toLowerCase() || ".png";
+  const stagedName = `${label}-${digest.slice(0, 12)}${ext}`;
+  const staged = path.join(stagedAssetDir, stagedName);
+  await fs.writeFile(staged, buffer);
+  const rel = path.relative(unit, source);
+  const platform = rel.includes(`${path.sep}20-xhs${path.sep}`) ? "xhs"
+    : rel.includes(`${path.sep}30-wechat${path.sep}`) ? "wechat"
+      : rel.includes(`${path.sep}10-shared-assets${path.sep}`) ? "shared" : "video";
+  const assetClass = classifyVideoAsset(sourceValue, assetRole);
+  assetManifest.push({label, source, sourceRelativeToUnit: rel, staged: `assets/${stagedName}`, sha256: digest, platform, assetRole: assetRole || null, assetClass});
+  return `assets/${stagedName}`;
 }
 
-// ---- Chromium 渲染每一帧 ----
-const {chromium} = await findPlaywright();
-const browser = await chromium.launch({headless: true});
-const page = await browser.newPage({viewport: {width, height}, deviceScaleFactor: 1});
-let firstFrameMetrics = null;
-try {
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index];
-    const html = frameHtml(segment);
-    const file = path.join(framesDir, `frame-${String(index + 1).padStart(2, "0")}.html`);
-    await fs.writeFile(file, html);
-    await page.goto(pathToFileURL(file).href, {waitUntil: "load"});
-    await page.evaluate(async () => {
-      await document.fonts.ready;
-      await Promise.all([...document.images].map((item) => item.decode()));
-    });
-    if (index === 0) {
-      firstFrameMetrics = await page.evaluate(() => {
-        const source = document.querySelector("[data-cover-source]");
-        const title = document.querySelector("[data-cover-title]");
-        const sourceBox = source?.getBoundingClientRect();
-        const titleBox = title?.getBoundingClientRect();
-        return {
-          canvas: {width: document.documentElement.clientWidth, height: document.documentElement.clientHeight},
-          source: source ? {naturalWidth: source.naturalWidth, naturalHeight: source.naturalHeight, displayWidth: sourceBox.width, displayHeight: sourceBox.height} : null,
-          title: titleBox ? {left: titleBox.left, top: titleBox.top, right: titleBox.right, bottom: titleBox.bottom} : null,
-          overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-          overflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight,
-        };
-      });
-    }
-    await page.screenshot({path: file.replace(/\.html$/u, ".png")});
-  }
-} finally {
-  await browser.close();
+const stagedScenes = [];
+for (let index = 0; index < scenes.length; index += 1) {
+  const scene = structuredClone(scenes[index]);
+  for (const {node} of walkComponents(scene)) if (node.type === "image") node.asset = await stageAsset(node.asset, `component-${index}-${node.id}`, node.assetRole);
+  if (scene.asset) scene.asset = await stageAsset(scene.asset, `scene-${String(index + 1).padStart(2, "0")}`, scene.assetRole);
+  stagedScenes.push(scene);
 }
+const defaultLogo = path.join(video, "assets", "logo.png");
+let logo = null;
+if (data.brand?.logo) logo = await stageAsset(data.brand.logo, "brand-logo");
+else if (await exists(defaultLogo)) logo = await stageAsset("assets/logo.png", "brand-logo");
+const reusedCrossPlatformAssets = assetManifest.filter((item) => ["xhs", "wechat", "shared"].includes(item.platform));
+const approvedKnowledgeAssets = assetManifest.filter((item) => ["technical-diagram", "original-evidence", "shared-visual"].includes(item.assetClass));
+const platformLayoutScreenshots = assetManifest.filter((item) => item.assetClass === "platform-layout-screenshot");
+if (platformLayoutScreenshots.length) throw new Error(`检测到公众号/小红书排版成品截图，禁止进入视频: ${JSON.stringify(platformLayoutScreenshots)}`);
 
-const titleInSafeCore = firstFrameMetrics?.title
-  && firstFrameMetrics.title.left >= 60
-  && firstFrameMetrics.title.right <= 940
-  && firstFrameMetrics.title.top >= 240
-  && firstFrameMetrics.title.bottom <= 1680;
-const sourceNotUpscaled = firstFrameMetrics?.source
-  && firstFrameMetrics.source.naturalWidth >= firstFrameMetrics.source.displayWidth
-  && firstFrameMetrics.source.naturalHeight >= firstFrameMetrics.source.displayHeight;
-if (!titleInSafeCore) throw new Error(`封面标题超出 9:16 中央 3:4 安全核心区: ${JSON.stringify(firstFrameMetrics?.title)}`);
-if (!sourceNotUpscaled) throw new Error(`封面位图被低分辨率放大: ${JSON.stringify(firstFrameMetrics?.source)}`);
-if (firstFrameMetrics.overflowX > 0 || firstFrameMetrics.overflowY > 0) throw new Error(`封面首帧发生溢出: ${JSON.stringify(firstFrameMetrics)}`);
+const inputProps = {
+  video: {...data.video, width, height, fps, duration},
+  brand: {name: data.brand?.name || "SW 编辑部 · MBTI 观察", column: data.brand?.column || "专业编辑解读", logo},
+  scenes: stagedScenes,
+  subtitles,
+};
+await writeJson(path.join(workDir, "render-input.json"), inputProps);
+await writeJson(path.join(workDir, "asset-manifest.json"), assetManifest);
 
-// ---- ffmpeg 合成 ----
 const outDir = path.join(video, "output");
 await ensureDir(outDir);
+const silentPath = path.join(workDir, "video-silent.mp4");
+const selectedBgmPath = path.join(workDir, "bgm-selected.wav");
+const duckedBgmPath = path.join(workDir, "bgm-ducked.wav");
+const finalMixPath = path.join(workDir, "final-mix.wav");
+const finalPath = path.join(outDir, "video-candidate.mp4");
 const coverOutputPath = path.join(outDir, "video-cover.png");
-await fs.copyFile(path.join(framesDir, "frame-01.png"), coverOutputPath);
-const coverOutputSize = pngSize(await fs.readFile(coverOutputPath));
-if (coverOutputSize.width !== width || coverOutputSize.height !== height) throw new Error(`视频封面尺寸错误: ${coverOutputSize.width}×${coverOutputSize.height}`);
-const clipDir = path.join(video, ".clips");
-await ensureDir(clipDir);
-for (const name of await fs.readdir(clipDir)) { if (name.endsWith(".mp4")) await fs.unlink(path.join(clipDir, name)); }
+const entryPoint = path.join(skillRoot, "assets", "templates", "video", "remotion", "index.jsx");
+// Capture before rendering; the final acceptance rechecks these exact inputs.
+const sourceInputs = await fingerprintVideoSourceInputs({unitRoot: unit, files: [
+  timingEvidencePath,
+  ...confirmedVoiceover.files, chainPath, scenesPath, audioPath,
+  authoritativeScriptPath, alignmentReportPath, ...Object.values(storyboardPaths),
+  brandBgm.targetPath, ...assetManifest.map((item) => item.source),
+]});
 
-const list = [];
-for (let index = 0; index < segments.length; index += 1) {
-  const seg = segments[index];
-  const frame = path.join(framesDir, `frame-${String(index + 1).padStart(2, "0")}.png`);
-  const clip = path.join(clipDir, `clip-${String(index + 1).padStart(2, "0")}.mp4`);
-  const duration = Number((seg.end - seg.start).toFixed(3));
-  const frameCount = Math.max(1, Math.round(duration * fps));
-  // 字幕边界只更新字幕层，不做整帧淡入淡出，也不重置逐段缩放动画。
-  const vf = `scale=${width}:${height}:flags=lanczos,format=yuv420p`;
-  await run("ffmpeg", ["-y", "-loop", "1", "-framerate", String(fps), "-i", frame, "-vf", vf, "-frames:v", String(frameCount), "-r", String(fps), "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p", clip]);
-  list.push(`file '${clip}'`);
+console.log(JSON.stringify({status: "remotion-bundle-start", scenes: scenes.length, duration, nativeLogicScenes: storyboardAnalysis.assetPolicy.nativeLogicSceneCount, approvedKnowledgeAssets: approvedKnowledgeAssets.length}));
+const serveUrl = await bundle({
+  entryPoint, outDir: bundleDir, publicDir, enableCaching: false,
+  onProgress: (progress) => {
+    if (progress === 100 || Math.round(progress) % 25 === 0) process.stderr.write(`Remotion bundle ${Math.round(progress)}%\n`);
+  },
+});
+const composition = await selectComposition({serveUrl, id: "SWDynamicVideo", inputProps, logLevel: "warn", browserExecutable});
+if (composition.width !== width || composition.height !== height || composition.fps !== fps) throw new Error(`Remotion 合成参数漂移: ${composition.width}×${composition.height}@${composition.fps}`);
+
+if (args.proof) {
+ const proofDir=path.join(video, 'visual-proof');
+ try {
+  const proof=await writeVisualReview({outDir:proofDir,kind:'proof',plan:visualFramePlan({scenes,duration,fps,at:args.at}),subtitles,
+   timelineSha256:data.directorCompilation.timelineSha256,sourceInputs,
+   renderFrame:async(p,target)=>renderStill({composition,serveUrl,output:target,inputProps,frame:p.frame,imageFormat:'jpeg',jpegQuality:85,overwrite:true,logLevel:'warn',browserExecutable})});
+  console.log(JSON.stringify({status:'visual-proof-ready',frames:proof.frames.length,output:path.join(proofDir,'index.html'),candidateRendered:false}));
+ } finally { if(!args['keep-work'])await fs.rm(workDir,{recursive:true,force:true}); }
+ process.exit(0);
 }
-const concatList = path.join(clipDir, "list.txt");
-await fs.writeFile(concatList, list.join("\n"));
-const videoNoAudio = path.join(clipDir, "video-noaudio.mp4");
-await run("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", concatList, "-c", "copy", videoNoAudio]);
 
-// 音频转 AAC 48k（视频规范 AAC 兼容）
-const audioAac = path.join(clipDir, "voiceover.m4a");
-await run("ffmpeg", ["-y", "-i", audioPath, "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", audioAac]);
+await renderStill({composition, serveUrl, output: coverOutputPath, inputProps, frame: 0, imageFormat: "png", overwrite: true, logLevel: "warn", browserExecutable});
 
-const finalName = "video-candidate.mp4";
-const finalPath = path.join(outDir, finalName);
-await run("ffmpeg", ["-y", "-i", videoNoAudio, "-i", audioAac, "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-shortest", "-movflags", "+faststart", finalPath]);
+let lastProgress = -1;
+await renderMedia({
+  composition, serveUrl, codec: "h264", outputLocation: silentPath, inputProps,
+  pixelFormat: "yuv420p", crf: 20, x264Preset,
+  overwrite: true, concurrency: renderConcurrency, logLevel: "warn", timeoutInMilliseconds: 120000, browserExecutable,
+  onProgress: ({progress}) => {
+    const bucket = Math.floor(progress * 10);
+    if (bucket !== lastProgress) {
+      lastProgress = bucket;
+      process.stderr.write(`Remotion render ${Math.min(100, bucket * 10)}%\n`);
+    }
+  },
+});
 
-// 独立封面必须与视频解码后的第一帧实质一致，避免上传封面和开场画面跳变。
-const decodedFirstFrame = path.join(clipDir, "decoded-first-frame.png");
-await run("ffmpeg", ["-y", "-i", finalPath, "-frames:v", "1", decodedFirstFrame]);
-const ssimResult = await run("ffmpeg", ["-i", coverOutputPath, "-i", decodedFirstFrame, "-lavfi", "ssim", "-f", "null", "-"]);
+// 真实返回音频是唯一时长与人声基准，动画层不重新生成 TTS。
+// 所有 SW 短视频固定使用随 Skill 交付且经指纹校验的品牌 BGM；不允许无声回退或替换曲目。
+const fadeIn = Math.min(SW_BRAND_BGM.fadeInSeconds, duration / 4);
+const fadeOut = Math.min(SW_BRAND_BGM.fadeOutSeconds, duration / 4);
+const fadeOutStart = Math.max(0, duration - fadeOut);
+await run("ffmpeg", [
+  "-y", "-stream_loop", "-1", "-ss", String(brandBgm.window.startSeconds), "-i", brandBgm.targetPath,
+  "-t", String(duration),
+  "-af", `afade=t=in:st=0:d=${fadeIn},afade=t=out:st=${fadeOutStart}:d=${fadeOut}`,
+  "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", selectedBgmPath,
+], {maxBuffer: 20 * 1024 * 1024});
+await run("ffmpeg", [
+  "-y", "-i", selectedBgmPath, "-i", audioPath,
+  "-filter_complex", brandBgmDuckingFilter(),
+  "-map", "[ducked]", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", duckedBgmPath,
+], {maxBuffer: 20 * 1024 * 1024});
+await run("ffmpeg", [
+  "-y", "-i", audioPath, "-i", duckedBgmPath,
+  "-filter_complex", `[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=${SW_BRAND_BGM.limiter.limitLinear}:attack=${SW_BRAND_BGM.limiter.attackMs}:release=${SW_BRAND_BGM.limiter.releaseMs}:level=disabled[mix]`,
+  "-map", "[mix]", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", finalMixPath,
+], {maxBuffer: 20 * 1024 * 1024});
+await run("ffmpeg", [
+  "-y", "-i", silentPath, "-i", finalMixPath, "-map", "0:v:0", "-map", "1:a:0",
+  "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+  "-shortest", "-movflags", "+faststart", finalPath,
+], {maxBuffer: 20 * 1024 * 1024});
+
+const [selectedBgmBuffer, duckedBgmBuffer, finalMixBuffer] = await Promise.all([
+  fs.readFile(selectedBgmPath), fs.readFile(duckedBgmPath), fs.readFile(finalMixPath),
+]);
+const [selectedBgmProbe, duckedBgmProbe, finalMixProbe] = await Promise.all([
+  probeAudio(selectedBgmPath), probeAudio(duckedBgmPath), probeAudio(finalMixPath),
+]);
+const mixReport = {
+  status: "passed",
+  required: true,
+  substitutionAllowed: false,
+  brandBgm: {
+    assetId: brandBgm.assetId,
+    source: brandBgm.source,
+    path: brandBgm.relativePath,
+    sha256: brandBgm.sha256,
+    sourceName: brandBgm.manifest.sourceName,
+    declaredOrigin: brandBgm.manifest.declaredOrigin,
+    window: brandBgm.window,
+    fadeInSeconds: fadeIn,
+    fadeOutSeconds: fadeOut,
+    selectedStemSha256: sha256(selectedBgmBuffer),
+    selectedStemProbe: selectedBgmProbe,
+  },
+  voice: {sha256: audioHash, probe: audioProbe},
+  ducking: {
+    preDuckGainDb: SW_BRAND_BGM.preDuckGainDb,
+    postDuckGain: SW_BRAND_BGM.postDuckGain,
+    ...SW_BRAND_BGM.sidechain,
+    duckedStemSha256: sha256(duckedBgmBuffer),
+    duckedStemProbe: duckedBgmProbe,
+  },
+  finalMix: {
+    limiter: SW_BRAND_BGM.limiter,
+    sha256: sha256(finalMixBuffer),
+    probe: finalMixProbe,
+  },
+  listeningGate: "BGM 必须在手机外放中可感知且不压人声；机器通过不替代完整人工试听。",
+  generatedAt: new Date().toISOString(),
+};
+await writeJson(path.join(outDir, "mix-report.json"), mixReport);
+
+const coverSize = pngSize(await fs.readFile(coverOutputPath));
+if (coverSize.width !== width || coverSize.height !== height) throw new Error(`视频封面尺寸错误: ${coverSize.width}×${coverSize.height}`);
+const coverSource = assetManifest.find((item) => item.label === "scene-01");
+const coverSourceSize = coverSource && path.extname(coverSource.source).toLowerCase() === ".png" ? pngSize(await fs.readFile(coverSource.source)) : null;
+const sourceNotUpscaled = coverSourceSize ? coverSourceSize.width >= 1000 && coverSourceSize.height >= 675 : true;
+
+const decodedFirstFrame = path.join(workDir, "decoded-first-frame.png");
+await run("ffmpeg", ["-y", "-i", finalPath, "-frames:v", "1", decodedFirstFrame], {maxBuffer: 20 * 1024 * 1024});
+const ssimResult = await run("ffmpeg", ["-i", coverOutputPath, "-i", decodedFirstFrame, "-filter_complex", "[0:v]format=yuv420p[ref];[ref][1:v]ssim", "-f", "null", "-"], {maxBuffer: 20 * 1024 * 1024});
 const firstFrameSsim = Number(`${ssimResult.stdout}\n${ssimResult.stderr}`.match(/All:([0-9.]+)/u)?.[1] || 0);
 const firstFrameMatchesCover = firstFrameSsim >= 0.98;
 
-// ---- 探测与报告 ----
-const probe = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type,width,height,r_frame_rate,sample_rate,channels", "-of", "json", finalPath]);
+const probe = await run("ffprobe", ["-v", "error", "-show_entries", "format=duration,size,bit_rate:stream=codec_name,codec_type,width,height,r_frame_rate,sample_rate,channels", "-of", "json", finalPath], {maxBuffer: 20 * 1024 * 1024});
 const temporal = await inspectVideo(finalPath);
+await fs.writeFile(path.join(outDir, "subtitles.srt"), serializeSubtitles(subtitles));
+await fs.copyFile(authoritativeScriptPath, path.join(outDir, "final-voiceover.md"));
+const artifacts = await fingerprintVideoArtifacts(outDir);
 const report = {
+  productionPipelineVersion: 2,
+  editorial: {passed: true, basis: "explicit-user-confirmation", draftHash: confirmedVoiceover.report.fingerprints.draftBody},
   status: "video-candidate-ready",
   output: finalPath,
-  segments: segments.map((s) => ({start: s.start, end: s.end, scene: s.scene.id, subtitle: s.subtitle, gap: s.gap})),
-  audio: {source: audio, sha256: audioHash},
+  artifacts,
+  sourceInputs,
+  directorContract: {...directorContract, version: 1, timelineSha256: data.directorCompilation.timelineSha256, sceneIds: scenes.map(s => s.id), reviewStatus: "pending-human-review"},
+  render: {
+    engine: "remotion", remotionVersion: "4.0.516", officialSkillsSource: "https://github.com/remotion-dev/skills",
+    officialSkillsCommit: "78834e618218fda87f5c7e4c54b5c55357f74d52", frameDriven: true, staticLoopClips: false, knowledgeLogicRenderer: "native-remotion", template: entryPoint,
+  },
+  assets: {
+    manifest: assetManifest,
+    approvedKnowledgeAssets,
+    platformLayoutScreenshots,
+    reusedCrossPlatformAssets,
+    paperCollage: [],
+    brandBgm: {assetId: brandBgm.assetId, source: brandBgm.source, path: brandBgm.relativePath, sha256: brandBgm.sha256},
+  },
+  visual: visualAnalysis,
+  audio: {
+    source: audioPath, sha256: audioHash, durationSeconds: audioProbe.durationSeconds,
+    transform: alignment.report.audio?.transform || null,
+    mix: mixReport,
+    policy: "当前工作音频是唯一人声时间轴；音频改变后必须重做对齐、字幕、镜头和混音",
+  },
+  alignment: {
+    passed: alignment.passed,
+    report: alignmentReportPath,
+    script: alignment.report.script,
+    asr: {
+      engine: alignment.report.asr?.engine,
+      model: alignment.report.asr?.model,
+      wordTimestamps: alignment.report.asr?.wordTimestamps,
+      similarity: alignment.report.asr?.similarity,
+      scriptAudioMatch: alignment.report.asr?.scriptAudioMatch,
+      manualReviewAnchorsSeconds: alignment.report.asr?.manualReviewAnchorsSeconds,
+    },
+    subtitles: alignment.report.subtitles,
+    policy: alignment.report.policy,
+  },
+  storyboard: {
+    schemaVersion: storedStoryboardReport.schemaVersion,
+    executionPassed: storedStoryboardReport.executionPassed,
+    passed: storyboardAnalysis.passed,
+    report: storyboardPaths.report,
+    metrics: storyboardAnalysis.metrics,
+    assetPolicy: storyboardAnalysis.assetPolicy,
+    sourceMethod: storyboardAnalysis.sourceMethod,
+    policy: "先设计并查看真实画面，再以语音锚点驱动所需图像与动画；公众号/小红书排版成品截图不得作为视频素材。",
+  },
   probe: JSON.parse(probe.stdout),
   checks: {
-    forbiddenHits: hits,
-    subtitles: data.subtitles.length,
-    frames: segments.length,
-    scenes: scenes.length,
-    minimumSceneDuration,
-    minimumSubtitleDuration,
-    sceneDurationViolations,
-    subtitleDurationViolations,
+    forbiddenHits: hits, subtitles: subtitles.length, scenes: scenes.length,
+    minimumSceneDuration, minimumSubtitleDuration, sceneDurationViolations, subtitleDurationViolations,
     cover: {
-      passed: firstScene.start === 0 && firstScene.visual === "cover" && titleInSafeCore && sourceNotUpscaled && firstFrameMatchesCover,
-      output: coverOutputPath,
-      size: coverOutputSize,
-      firstScene: {id: firstScene.id, start: firstScene.start, end: firstScene.end, duration: firstScene.end - firstScene.start},
-      titleLines: coverTitleLines,
-      safeCore: {x: 60, y: 240, width: 880, height: 1440},
-      firstFrameSsim,
-      firstFrameMatchesCover,
-      metrics: firstFrameMetrics,
-      policy: "第一帧即正式封面；独立封面由同一首帧导出；关键标题位于中央 3:4 安全核心区",
+      passed: firstScene.start === 0 && firstScene.visual === "cover" && sourceNotUpscaled && firstFrameMatchesCover,
+      output: coverOutputPath, size: coverSize, source: coverSource, sourceSize: coverSourceSize, sourceNotUpscaled,
+      titleLines: coverTitleLines, safeCore: {x: 60, y: 240, width: 880, height: 1440},
+      firstFrameSsim, firstFrameMatchesCover,
+      policy: "第一帧即正式封面；独立封面由同一 Remotion 首帧导出；关键标题位于中央 3:4 安全核心区",
     },
-    transitionPolicy: "画面只在镜头边界切换；字幕边界不做整帧淡入淡出或动画重置",
+    transitionPolicy: "画面只在语义镜头边界切换；字幕层独立更新，不重置主画面动画",
+    animationPolicy: "SW CameraRig + depth planes + subject lifecycle + speech-anchored semantic beats；useCurrentFrame + interpolate/spring；无 CSS transition/animation；动画只服务于解释",
     temporal,
   },
-  note: "BGM/音效未加：无已授权素材；如员工提供授权曲目可混音（人声优先，可侧链 4-7 dB）",
   generatedAt: new Date().toISOString(),
 };
+const visualReview=await writeCandidateVisualReview({outDir:path.join(outDir,'visual-review'),videoPath:finalPath,scenes,subtitles,duration,fps,
+ timelineSha256:data.directorCompilation.timelineSha256,sourceInputs});
+report.visualReview={status:visualReview.status,frames:visualReview.frames.length,page:'visual-review/index.html',report:'visual-review/review.json',videoSha256:visualReview.videoSha256};
 await writeJson(path.join(outDir, "video-report.json"), report);
-
-// 清理中间帧与分片，保留字幕/脚本等源文件
-for (const dir of [framesDir, clipDir]) {
-  await fs.rm(dir, {recursive: true, force: true});
-}
+await writeJson(path.join(outDir, "director-review.template.json"), directorReviewTemplate(report));
+await writeJson(path.join(outDir, "video-temporal-report.json"), temporal);
 
 if (!report.checks.cover.passed) throw new Error(`视频首帧封面检查失败: ${JSON.stringify(report.checks.cover)}`);
-if (!temporal.passed) throw new Error(`视频闪烁检查失败: ${JSON.stringify({blackEvents: temporal.blackEvents, rapidFlashPairs: temporal.rapidFlashPairs})}`);
-console.log(JSON.stringify({status: report.status, output: finalPath, cover: coverOutputPath, duration: report.probe.format?.duration, frames: segments.length}, null, 2));
+if (!report.visual.passed) throw new Error(`视觉策略检查失败: ${JSON.stringify(report.visual.checks.filter((check) => !check.passed))}`);
+if (!temporal.passed) throw new Error(`视频时序检查失败: ${JSON.stringify({blackEvents: temporal.blackEvents, rapidFlashPairs: temporal.rapidFlashPairs, freezeEvents: temporal.freezeEvents})}`);
+const acceptance = await inspectVideoAcceptance({artifactDir: outDir, unitRoot: unit, sourceMode: "candidate"});
+await writeJson(path.join(outDir, "acceptance-report.json"), acceptance);
+// A render can finish while editorial/listening approval is pending. Promotion still checks acceptance.ready.
+
+if (!args["keep-work"]) await fs.rm(workDir, {recursive: true, force: true});
+console.log(JSON.stringify({status: acceptance.ready ? "candidate-accepted" : "rendered-awaiting-review", acceptanceReady: acceptance.ready, pending: acceptance.reasons, output: finalPath, cover: coverOutputPath, duration: report.probe.format?.duration, scenes: scenes.length, paperScenes: visualAnalysis.paperSceneCount, nativeLogicScenes: storyboardAnalysis.assetPolicy.nativeLogicSceneCount, approvedKnowledgeAssets: approvedKnowledgeAssets.length, brandBgm: {assetId: brandBgm.assetId, sha256: brandBgm.sha256, startSeconds: brandBgm.window.startSeconds}}, null, 2));

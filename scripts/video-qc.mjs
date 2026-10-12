@@ -24,6 +24,14 @@ export async function inspectVideo(input) {
   const blackEvents = [...blackResult.stderr.matchAll(/black_start:([0-9.]+)\s+black_end:([0-9.]+)\s+black_duration:([0-9.]+)/gu)].map((match) => ({start: Number(match[1]), end: Number(match[2]), duration: Number(match[3])}));
   const sceneResult = await run("ffmpeg", ["-hide_banner", "-i", file, "-vf", "select=gt(scene\\,0.55),showinfo", "-an", "-f", "null", "-"], options);
   const sceneChanges = [...sceneResult.stderr.matchAll(/pts_time:([0-9.]+)/gu)].map((match) => Number(match[1]));
+  // 只检查主画面舞台，排除固定品牌头和字幕区。这能捕捉“字幕在变，主画面却僵住”的假动态。
+  const freezeResult = await run("ffmpeg", [
+    "-hide_banner", "-i", file,
+    "-vf", "crop=iw:ih-395:0:140,freezedetect=n=0.0008:d=2.6",
+    "-an", "-f", "null", "-",
+  ], options);
+  const freezeEvents = [...freezeResult.stderr.matchAll(/freeze_start:\s*([0-9.]+)[\s\S]*?freeze_duration:\s*([0-9.]+)[\s\S]*?freeze_end:\s*([0-9.]+)/gu)]
+    .map((match) => ({start: Number(match[1]), duration: Number(match[2]), end: Number(match[3])}));
   const rapidWindow = Math.max(3 / fps, 0.12);
   const rapidFlashPairs = [];
   for (let index = 1; index < sceneChanges.length; index += 1) {
@@ -37,10 +45,14 @@ export async function inspectVideo(input) {
     blackEvents,
     sceneChanges,
     rapidFlashPairs,
+    freezeEvents,
+    freezeReviewRequired: freezeEvents.length > 0,
     policy: {
       maxBlackEvents: 0,
       rapidFlashWindowSeconds: rapidWindow,
-      note: "SW 浅底色视频不允许非脚本化整帧黑闪；相邻强切变化小于三帧视为疑似单帧闪烁。",
+      maxUnscriptedStageFreezeSeconds: 2.6,
+      freezeCrop: "crop=iw:ih-395:0:140",
+      note: "SW 浅底色视频不允许非脚本化整帧黑闪；相邻强切变化小于三帧视为疑似单帧闪烁；主画面静止超过 2.6 秒列入导演审片；静止可能是必要阅读停顿，不靠装饰运动绕过。",
     },
     passed: blackEvents.length === 0 && rapidFlashPairs.length === 0,
   };
@@ -56,6 +68,6 @@ if (isCli) {
   const report = await inspectVideo(args.input);
   if (args.report) await writeJson(path.resolve(args.report), report);
   else await fs.writeFile(path.join(path.dirname(path.resolve(args.input)), "video-temporal-report.json"), `${JSON.stringify(report, null, 2)}\n`);
-  console.log(JSON.stringify({input: report.input, passed: report.passed, blackEvents: report.blackEvents.length, rapidFlashPairs: report.rapidFlashPairs.length}, null, 2));
+  console.log(JSON.stringify({input: report.input, passed: report.passed, blackEvents: report.blackEvents.length, rapidFlashPairs: report.rapidFlashPairs.length, freezeEvents: report.freezeEvents.length}, null, 2));
   if (!report.passed) process.exitCode = 1;
 }

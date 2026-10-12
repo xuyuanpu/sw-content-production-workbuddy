@@ -1,0 +1,13 @@
+{
+  "engine": "local-word-level-asr",
+  "model": "请填写实际模型",
+  "wordTimestamps": true,
+  "audioSha256": "请填写当前工作音频 SHA256",
+  "transcript": "请填写本地 ASR 对当前工作音频的完整转写",
+  "manualReviewAnchorsSeconds": [
+    0,
+    15,
+    30
+  ],
+  "segments": []
+}

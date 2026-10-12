@@ -2,6 +2,15 @@
   "title": "一句自然通顺的公众号标题",
   "summary": "不超过两句的分享摘要。",
   "lead": "用一小段进入问题，不重复标题。",
+  "cover": {
+    "src": "assets/cover-image.png",
+    "alt": "与文章核心问题直接相关的无文字主题图片",
+    "titleLines": ["一句自然通顺的", "公众号标题"],
+    "subtitle": "用一句补充说明帮助理解主题",
+    "highlight": "公众号标题",
+    "category": "MBTI · PROFESSIONAL VIEW",
+    "position": {"x": 50, "y": 50}
+  },
   "sections": [
     {
       "heading": "第一个专业判断",

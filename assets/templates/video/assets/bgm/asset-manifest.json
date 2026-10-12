@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "assetId": "sw-brand-bgm-v1",
+  "file": "sw-brand-bgm.mp3",
+  "sourceName": "轻松专业 BGM.mp3",
+  "sha256": "0be398827ba3f1b4a297748b9b49f6b104d0db5549f08471daf7cc98892b9c7c",
+  "codec": "mp3",
+  "sampleRate": 44100,
+  "channels": 2,
+  "durationSeconds": 146.390204,
+  "declaredOrigin": "用户确认为 SW 原创音乐，并指定为所有 SW 短视频的固定品牌 BGM。",
+  "useScope": "仅供获得授权的 SW 员工用于 SW 内容生产；本声明不替代线下权属凭据。",
+  "required": true,
+  "substitutionAllowed": false
+}

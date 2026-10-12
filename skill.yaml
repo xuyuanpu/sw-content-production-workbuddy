@@ -1,6 +1,6 @@
 id: sw-content-production
 name: SW 内容生产
-description: 将 SW 原始业务资料自动生产为工作坊教案红 VI 的小红书与公众号候选，并通过人工 MiniMax 语音门半自动完成视频号；包含来源追溯、官方机构口径、品牌验收、归档与人工发布载荷。
+description: 按用户选择的平台与阶段，从有来源材料生成 SW 内容候选，按需制作图文和音频后视频。
 tags:
   - workbuddy
   - sw
@@ -22,7 +22,7 @@ deploy:
 source:
   type: github
   url: https://github.com/xuyuanpu/sw-content-production-workbuddy
-summary_zh: SW 员工内容生产 Skill：小红书和公众号自动生成，短视频在人工 MiniMax 语音交接后继续自动生成。
+summary_zh: 先理解材料，按平台出稿；需要时查询知识库、制作图文和视频，人工确认后交接。
 category: writing
 category_name: 写作与内容
 risk: medium

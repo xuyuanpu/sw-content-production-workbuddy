@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "reviewerRole": "second-pass-science-editor",
+  "decision": "revise",
+  "writer": {
+    "id": "",
+    "contextId": ""
+  },
+  "reviewer": {
+    "id": "",
+    "contextId": "",
+    "mode": "",
+    "recordRef": ""
+  },
+  "inputFingerprints": {
+    "brief": "",
+    "hooks": "",
+    "chain": "",
+    "draft": ""
+  },
+  "checks": {
+    "oneQuestion": false,
+    "oneThesis": false,
+    "hookPayoffAligned": false,
+    "mechanismExplained": false,
+    "exampleConcrete": false,
+    "boundaryPresent": false,
+    "informationGain": false,
+    "genericLanguageRemoved": false,
+    "factsTraceable": false,
+    "swOfficialVoice": false,
+    "noPersonalAttribution": false
+  },
+  "evidence": {
+    "hook": {"excerpt": "", "reason": "", "beatIds": []},
+    "rehook": {"excerpt": "", "reason": "", "beatIds": []},
+    "mechanism": {"excerpt": "", "reason": "", "beatIds": []},
+    "exampleOrContrast": {"excerpt": "", "reason": "", "beatIds": []},
+    "boundary": {"excerpt": "", "reason": "", "beatIds": []},
+    "takeaway": {"excerpt": "", "reason": "", "beatIds": []}
+  },
+  "threeQuestions": {
+    "learningOutcome": {"answer": "", "excerpt": "", "reason": "", "beatIds": []},
+    "mechanism": {"answer": "", "excerpt": "", "reason": "", "beatIds": []},
+    "example": {"answer": "", "excerpt": "", "reason": "", "beatIds": []}
+  },
+  "knowledgeBeatMapping": [],
+  "informationGain": [],
+  "genericSubstitutionTest": {
+    "originalTerm": "",
+    "replacement": "",
+    "originalExcerpt": "",
+    "substitutedExcerpt": "",
+    "stillValid": true,
+    "reason": ""
+  },
+  "notes": [
+    "默认 revise。作者不能在同一上下文改角色名后自审；必须由新上下文、另一 Agent 或另一位员工独立填写审稿。",
+    "reviewer.mode 选择 new-context-agent、separate-agent 或 separate-human，并记录可回查的独立审阅记录位置。",
+    "inputFingerprints 填首次 QC 报告的 brief/hooks/chain/draft 指纹；稿件或链条改变后必须重新独立审阅，不能只更新哈希。",
+    "knowledgeBeatMapping 每个当前 B-xx 一项，包含 beatId、chainExcerpt、draftExcerpt、reason。六类 evidence 逐类引用原文并说明理由。",
+    "程序仅验证结构、引用、指纹和审阅记录完整性，不认证审阅人身份或专业语义；专业、品牌和发布仍由人工确认。"
+  ]
+}

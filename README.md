@@ -1,82 +1,40 @@
-# SW 内容生产 WorkBuddy Skill
+# SW 内容生产 Skill
 
-面向 SW（Skill&Will）员工的内容生产 Skill。输入一份有明确来源和使用边界的原始资料后：
+本地维护版本 **1.19.0**。视频先设计并检查真实画面，提供同一渲染器的 `--proof` 视觉试稿及候选全片时间轴审阅页；支持可组合组件，导演自行选择图形、文字、图像、分组及语音关键帧，不再按语义绑定固定模板。为 SW 把有来源的材料写成所选平台的可读候选，按需制作图文，收到确认音频后制作视频。写稿先交一稿，不安装媒体依赖、不启动默认的独立审稿循环。入口见 [SKILL.md](SKILL.md)。
 
-- 自动生成工作坊教案·红 VI 的小红书图文、拼接长图和发布文案候选；
-- 自动生成 1000～1500 字、含实质内容图和 SW 固定品牌壳的公众号 HTML、长图和发布文案候选；固定品牌文字不计入正文、不得精简；
-- 自动生成自然口语内容稿和经硬校验的 MiniMax 唯一机器稿；员工在海外 MiniMax 手动生成并回传音频后，再继续完成首帧封面、分镜、字幕、Remotion 画面、BGM、音效和成片候选；
-- 自动生成跨平台验收页，同页预览并复制小红书、公众号和口播机器稿；内容不可见或语气校验未通过时同步禁用复制按钮，避免假就绪；最终坚持“AI 生成、人审确认、人工发布”。
+## 文件职责
 
-> 内部使用：本仓库包含 SW 品牌规范与内容生产规则，只提供给获得授权的 SW 员工。
+| 文件 | 唯一职责 |
+| --- | --- |
+| SKILL.md | 识别当前阶段，指向所选平台 |
+| references/source-policy.md | 受众、原题、来源和事实边界，内容自查与交稿 |
+| references/brand.md | 品牌身份、标识和视觉常量 |
+| references/xiaohongshu.md | 小红书写法、选择依据、完整示范和交稿 |
+| references/wechat.md | 公众号写法、选择依据、完整示范和交稿 |
+| references/voiceover.md | 口播写法、选择依据、修改实例和交稿 |
+| references/knowledge-query.md | 按素材缺口检索，读取原文，最多三轮后转其他路径 |
+| references/xhs-production.md、wechat-production.md | 对应平台的图文输入、渲染与技术检查 |
+| references/audio.md | 确认稿到机器稿、人工音频、真实时间对齐 |
+| references/video-production.md | 唯一画面计划、视觉选择、编译和完整审片 |
+| references/remotion.md | 按需读取的底层渲染实现 |
+| references/delivery.md | 分平台验收、候选/成品状态和交接 |
+| references/deployment.md | 安装、阶段依赖、升级与分发 |
+| assets/templates、assets/brand | 制作模板和固定品牌资产；不作为额外写作指令 |
+| scripts、tests | 可执行技术检查及回归测试 |
+| legacy | 历史规范与旧报告兼容工具；默认不读取、不执行 |
 
-## 员工安装
+index 是持续更新的审核页面，口播初稿写完即可展示和复制，配音/成片状态分别记录。自然文稿是写作阶段的成果，不要求预先填完配音、分镜、渲染或发布文件。小红书、公众号样本标为编辑示范，不能宣称为真实用户案例或已验证爆款；口播修改实例保留适用条件。
 
-### 方式一：GitHub Release（推荐）
+## 维护
 
-1. 打开仓库右侧 **Releases**，下载最新版 `sw-content-production-workbuddy-v*.zip`。
-2. 在 WorkBuddy 打开“技能” → “添加技能” → “上传技能”。
-3. 选择下载的 ZIP，等待安全检查完成并启用“SW 内容生产”。
-4. 新建任务时选择员工自己的内容工作空间，并启用本 Skill。
+源目录是唯一维护点。先修改与测试源包，后封包部署：
 
-WorkBuddy 当前官方说明的 Skill 安装入口是“上传本地技能包”；GitHub 在这里承担受控分发与版本更新，不冒充未被官方文档确认的仓库 URL 一键安装能力。
-
-### 方式二：克隆仓库部署
-
-适合需要维护或频繁升级的员工：
-
-```bash
-git clone https://github.com/xuyuanpu/sw-content-production-workbuddy.git
-cd sw-content-production-workbuddy
-node scripts/deploy.mjs
+```sh
+npm test
+npm run test:legacy
+node scripts/release-integrity.mjs --seal
+node scripts/release-integrity.mjs
+node scripts/deploy.mjs --host workbuddy
 ```
 
-部署脚本会把旧版备份后安装到当前用户的 WorkBuddy 技能目录，并打印后续依赖安装与环境检查命令。
-
-## 首次检查
-
-```bash
-npm install
-npx playwright install chromium
-node scripts/doctor.mjs
-```
-
-基础图文生产需要 Node.js 18+、Playwright 和 Chromium；完成视频阶段还需要 `ffmpeg`、`ffprobe` 与可运行的 Remotion 环境。
-
-视频构建会同时生成与第一帧一致的 `video-cover.png`，并检查 9:16 尺寸、中央安全区和第一帧一致性。视频完成后还可单独检查时间稳定性：
-
-```bash
-node scripts/video-qc.mjs --input <video-candidate.mp4>
-```
-
-口播机器稿交给员工前必须生成当前语气质检报告：
-
-```bash
-node scripts/voiceover-qc.mjs \
-  --draft <内容单元>/AIworkspace/40-video/current/voiceover-draft.md \
-  --tts <内容单元>/AIworkspace/40-video/current/tts-input.txt \
-  --report <内容单元>/AIworkspace/40-video/current/voiceover-report.json
-```
-
-## 使用方式
-
-在 WorkBuddy 中选择本 Skill，然后提供原始资料并说明：
-
-```text
-请按 SW 内容生产规范，把这份原始资料生成小红书、公众号和短视频口播候选。
-```
-
-详细规则与命令见：
-
-- [Skill 主流程](SKILL.md)
-- [品牌与机构口径](references/brand.md)
-- [生产工作流](references/workflow.md)
-- [质量验收](references/quality.md)
-- [部署与升级](references/deployment.md)
-
-## 固定边界
-
-- 对外内容统一使用 SW / Skill&Will 官方机构身份，不出现被禁用的个人署名或归属。
-- 不把个人经历机械改写成机构经历。
-- 草稿、源码、素材处理和历史版本只进入 `AIworkspace`，平台目录只保留人工确认的当前成品。
-- 不自动登录、发布、排期或调用未经授权的计费接口。
-- 没有员工确认的真实音频，不进入最终短视频生产。
+依赖锁相同的本地升级保留 node_modules。写稿不需要 npm 安装。图文/视频阶段按部署说明安装并检查。ZIP 不含依赖、缓存、用户内容或密钥。GitHub 仓库与 Release 是分发渠道，本地版本号不代表已经发布线上版本。
